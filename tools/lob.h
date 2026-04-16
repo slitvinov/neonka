@@ -1,4 +1,4 @@
-enum {nl = 8};
+enum { nl = 8 };
 struct Row {
   int16_t askRate[nl];
   int16_t bidRate[nl];

@@ -1,3 +1,4 @@
+#include "lob.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -8,11 +9,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <assert.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include "lob.h"
 
 enum { MAXK = 9, STORE_MAX = 100 };
 static int overlap8(const int16_t *a, const int16_t *b) {
