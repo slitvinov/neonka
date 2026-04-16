@@ -8,5 +8,5 @@ if [ ! -f data/train.raw ]; then
 fi
 
 if [ ! -f data/sessions.raw ]; then
-    tools/sessions data/train.raw data/sessions.raw
+    tools/split < data/train.raw > data/sessions.raw
 fi
