@@ -1,16 +1,12 @@
-/* encode.c — standalone LOB encoder
- * Usage: ./encode <input.raw> <output.lob>
+/* encode.c — LOB encoder (stream)
+ * Usage: encode < <input.raw> > <output.lob>
  */
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-enum { nl = 8 };
+enum { nl = 8, CHUNK = 4096 };
 
 struct Row {
   int16_t askRate[nl];
@@ -139,52 +135,19 @@ static void encode_lob(const struct Row *rows, int64_t n, int64_t start_tick,
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: %s <input.raw> <output.lob>\n", argv[0]);
+  (void)argc;
+  (void)argv;
+  struct Row *buf = malloc((size_t)CHUNK * sizeof *buf);
+  if (buf == NULL) {
+    fprintf(stderr, "encode.c: error: malloc failed\n");
     return 1;
   }
-
-  int fd = open(argv[1], O_RDONLY);
-  if (fd < 0) {
-    perror(argv[1]);
-    return 1;
+  int64_t total = 0;
+  size_t got;
+  while ((got = fread(buf, sizeof *buf, CHUNK, stdin)) > 0) {
+    encode_lob(buf, (int64_t)got, total, stdout);
+    total += (int64_t)got;
   }
-
-  struct stat st;
-  if (fstat(fd, &st) != 0) {
-    perror("fstat");
-    close(fd);
-    return 1;
-  }
-
-  int64_t bytes = (int64_t)st.st_size;
-  if (bytes % (int64_t)sizeof(struct Row) != 0) {
-    fprintf(stderr, "%s: size %lld is not a multiple of row size %zu\n",
-            argv[1], (long long)bytes, sizeof(struct Row));
-    close(fd);
-    return 1;
-  }
-
-  struct Row *rows = mmap(NULL, (size_t)bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-  close(fd);
-  if (rows == MAP_FAILED) {
-    perror("mmap");
-    return 1;
-  }
-
-  int64_t n = bytes / (int64_t)sizeof(struct Row);
-
-  FILE *out = strcmp(argv[2], "-") == 0 ? stdout : fopen(argv[2], "wb");
-  if (!out) {
-    perror(argv[2]);
-    munmap(rows, (size_t)bytes);
-    return 1;
-  }
-
-  encode_lob(rows, n, 0, out);
-
-  if (out != stdout)
-    fclose(out);
-  munmap(rows, (size_t)bytes);
+  free(buf);
   return 0;
 }

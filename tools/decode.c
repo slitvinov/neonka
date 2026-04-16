@@ -1,5 +1,5 @@
-/* decode.c — standalone LOB decoder
- * Usage: ./decode <input.lob> <output.raw>
+/* decode.c — LOB decoder (stream)
+ * Usage: decode < <input.lob> > <output.raw>
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -127,7 +127,7 @@ static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
       }
       break;
     } else {
-      fprintf(stderr, "decode_side: unknown op %u\n", op);
+      fprintf(stderr, "decode.c: error: unknown op %u in decode_side\n", op);
       return -1;
     }
   }
@@ -135,23 +135,10 @@ static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: %s <input.lob> <output.raw>\n", argv[0]);
-    return 1;
-  }
-
-  FILE *in = strcmp(argv[1], "-") == 0 ? stdin : fopen(argv[1], "rb");
-  if (!in) {
-    perror(argv[1]);
-    return 1;
-  }
-
-  FILE *out = fopen(argv[2], "wb");
-  if (!out) {
-    perror(argv[2]);
-    fclose(in);
-    return 1;
-  }
+  (void)argc;
+  (void)argv;
+  FILE *in = stdin;
+  FILE *out = stdout;
 
   struct Row books[2];
   int cur = 0, prv = 1;
@@ -184,7 +171,7 @@ int main(int argc, char **argv) {
 
       uint8_t flags;
       if (r_u8(in, &flags) != 0) {
-        fprintf(stderr, "decode: unexpected EOF at tick %lld\n",
+        fprintf(stderr, "decode.c: error: unexpected EOF at tick %lld\n",
                 (long long)(total + i));
         goto done;
       }
@@ -210,15 +197,9 @@ int main(int argc, char **argv) {
   }
 
 done:
-  if (in != stdin)
-    fclose(in);
-  fclose(out);
   return 0;
 
 fail:
-  fprintf(stderr, "decode: error in stream\n");
-  if (in != stdin)
-    fclose(in);
-  fclose(out);
+  fprintf(stderr, "decode.c: error: stream corrupt\n");
   return 1;
 }
