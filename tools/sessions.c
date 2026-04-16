@@ -1,4 +1,3 @@
-#include "lob.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -9,8 +8,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lob.h"
 
-enum { MAXK = 9, STORE_MAX = 100 };
+enum { MAXK = nl + 1, STORE_MAX = 100 };
 static int overlap8(const int16_t *a, const int16_t *b) {
   int n = 0;
   for (int j = 0; j < nl; j++) {
@@ -58,17 +58,14 @@ int main(int argc, char **argv) {
       printf("% 9lld ", C[i][j]);
     printf("\n");
   }
-  for (i = 0; i < p; i++)
-    printf("% 2lld % 9lld\n", i, store[i]);
-
   FILE *f = fopen(argv[2], "wb");
   if (f == NULL) {
-    fprintf(stderr, "split.c: error: fail to open '%s'\n", argv[2]);
+    fprintf(stderr, "sessions.c: error: fail to open '%s'\n", argv[2]);
     free_raw(rows, n);
     return 1;
   }
   if (fwrite(store, sizeof(int64_t), (size_t)p, f) != (size_t)p) {
-    fprintf(stderr, "split.c: error: fwrite failed for '%s'\n", argv[2]);
+    fprintf(stderr, "sessions.c: error: fwrite failed for '%s'\n", argv[2]);
     fclose(f);
     free_raw(rows, n);
     return 1;
