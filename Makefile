@@ -1,8 +1,11 @@
 .SUFFIXES: .c
+CFLAGS = -O2
 
 .c:
-	cc -O2 -Wall -o $@ $<
+	cc $(CFLAGS) -o $@ $<
 
-all: convert csv validate report encode decode split session offset stride flip center overlap events pairs replay pack untick
+S = convert csv validate report encode decode split session offset stride flip center overlap events pairs replay pack
+
+all: $S
 clean:
-	rm -f convert csv validate report encode decode split session offset stride flip center overlap events pairs replay pack untick
+	rm -f $S
