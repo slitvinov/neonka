@@ -20,19 +20,23 @@ static void walk(int32_t *pR, int32_t *pN, int32_t *pS, int32_t *cR,
   while (i < nl && j < nl && pN[i] != 0 && cN[j] != 0) {
     d = diff(cR[j], pR[i]);
     if (d < 0) {
-      (*tbl[j != 0][0])++;
+      (*tbl[j != 0][0]) += pN[j];
       j++;
     } else if (d == 0) {
       dn = cN[j] - pN[i];
       ds = cS[j] - pS[i];
       if (dn)
+<<<<<<< HEAD
         (*tbl[j != 0][dn < 0]) += dn < 0 ? -dn : dn;
+=======
+        (*tbl[j != 0][dn < 0]) += abs(dn);
+>>>>>>> ba3d89e (up)
       else if (ds != 0)
         (*r)++;
       i++;
       j++;
     } else {
-      (*tbl[i != 0][1])++;
+      (*tbl[i != 0][1]) += pN[i];
       i++;
     }
   }
@@ -41,11 +45,6 @@ static void walk(int32_t *pR, int32_t *pN, int32_t *pS, int32_t *cR,
 int main(int argc, char **argv) {
   int i_arg;
   for (i_arg = 1; i_arg < argc; i_arg++) {
-    if (strcmp(argv[i_arg], "-H") == 0) {
-      printf("%10s %10s %10s %10s %10s %10s %10s\n", "ntics", "tp", "tm", "dp",
-             "dm", "r", "n");
-      return 0;
-    }
     fprintf(stderr, "events.c: error: unknown flag '%s'\n", argv[i_arg]);
     return 1;
   }
