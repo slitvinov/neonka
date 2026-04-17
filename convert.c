@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (fgets(line, sizeof line, in) == NULL) {
-    fprintf(stderr, "convert.c: error: fail to read header\n");
+    fprintf(stderr, "convert.c: error: failed to read header\n");
     return 1;
   }
   nr = 0;

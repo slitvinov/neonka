@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
   }
   FILE *sf = fopen(spath, "rb");
   if (sf == NULL) {
-    fprintf(stderr, "session.c: error: fail to open '%s'\n", spath);
+    fprintf(stderr, "session.c: error: failed to open '%s'\n", spath);
     free(sids);
     return 1;
   }
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
   }
   FILE *in = fopen(dpath, "rb");
   if (in == NULL) {
-    fprintf(stderr, "session.c: error: fail to open '%s'\n", dpath);
+    fprintf(stderr, "session.c: error: failed to open '%s'\n", dpath);
     free(store);
     free(sids);
     return 1;
