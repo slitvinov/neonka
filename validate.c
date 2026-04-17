@@ -14,11 +14,9 @@ int main(int argc, char **argv) {
   struct Row r;
   long long nr = 0;
   long long nzm = 0, nncs = 0, nsrt = 0, ncross = 0;
-  char *gnames[6] = {"aR", "bR", "aS",
-                           "bS", "aN",   "bN"};
+  char *gnames[6] = {"aR", "bR", "aS", "bS", "aN", "bN"};
   while (fread(&r, sizeof r, 1, stdin) == 1) {
-    int32_t *groups[6] = {r.aR, r.bR, r.aS,
-                          r.bS, r.aN,   r.bN};
+    int32_t *groups[6] = {r.aR, r.bR, r.aS, r.bS, r.aN, r.bN};
     int g, j;
     for (g = 0; g < 6; g++) {
       int saw_zero = 0;
@@ -37,40 +35,35 @@ int main(int argc, char **argv) {
     for (j = 0; j < nl; j++) {
       if (r.aN[j] > r.aS[j]) {
         if (nncs < 10)
-          fprintf(stderr, "NC>Size row %lld: aN_%d=%d > aS_%d=%d\n",
-                  nr + 1, j, r.aN[j], j, r.aS[j]);
+          fprintf(stderr, "NC>Size row %lld: aN_%d=%d > aS_%d=%d\n", nr + 1, j,
+                  r.aN[j], j, r.aS[j]);
         nncs++;
       }
       if (r.bN[j] > r.bS[j]) {
         if (nncs < 10)
-          fprintf(stderr, "NC>Size row %lld: bN_%d=%d > bS_%d=%d\n",
-                  nr + 1, j, r.bN[j], j, r.bS[j]);
+          fprintf(stderr, "NC>Size row %lld: bN_%d=%d > bS_%d=%d\n", nr + 1, j,
+                  r.bN[j], j, r.bS[j]);
         nncs++;
       }
     }
     for (j = 1; j < nl; j++) {
-      if (r.aR[j] != 0 && r.aR[j - 1] != 0 &&
-          r.aR[j] <= r.aR[j - 1]) {
+      if (r.aR[j] != 0 && r.aR[j - 1] != 0 && r.aR[j] <= r.aR[j - 1]) {
         if (nsrt < 10)
-          fprintf(stderr,
-                  "sort row %lld: aR_%d=%d <= aR_%d=%d\n",
-                  nr + 1, j, r.aR[j], j - 1, r.aR[j - 1]);
+          fprintf(stderr, "sort row %lld: aR_%d=%d <= aR_%d=%d\n", nr + 1, j,
+                  r.aR[j], j - 1, r.aR[j - 1]);
         nsrt++;
       }
-      if (r.bR[j] != 0 && r.bR[j - 1] != 0 &&
-          r.bR[j] >= r.bR[j - 1]) {
+      if (r.bR[j] != 0 && r.bR[j - 1] != 0 && r.bR[j] >= r.bR[j - 1]) {
         if (nsrt < 10)
-          fprintf(stderr,
-                  "sort row %lld: bR_%d=%d >= bR_%d=%d\n",
-                  nr + 1, j, r.bR[j], j - 1, r.bR[j - 1]);
+          fprintf(stderr, "sort row %lld: bR_%d=%d >= bR_%d=%d\n", nr + 1, j,
+                  r.bR[j], j - 1, r.bR[j - 1]);
         nsrt++;
       }
     }
-    if (r.aR[0] != 0 && r.bR[0] != 0 &&
-        r.aR[0] < r.bR[0]) {
+    if (r.aR[0] != 0 && r.bR[0] != 0 && r.aR[0] < r.bR[0]) {
       if (ncross < 10)
-        fprintf(stderr, "crossed row %lld: aR_0=%d < bR_0=%d\n",
-                nr + 1, r.aR[0], r.bR[0]);
+        fprintf(stderr, "crossed row %lld: aR_0=%d < bR_0=%d\n", nr + 1,
+                r.aR[0], r.bR[0]);
       ncross++;
     }
     if (fwrite(&r, sizeof r, 1, stdout) != 1) {

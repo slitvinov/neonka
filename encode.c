@@ -30,8 +30,8 @@ static void w_i64(FILE *f, int64_t v) {
   fwrite(b, 1, 8, f);
 }
 
-static int same_side(int32_t *r1, int32_t *s1, int32_t *n1,
-                     int32_t *r0, int32_t *s0, int32_t *n0) {
+static int same_side(int32_t *r1, int32_t *s1, int32_t *n1, int32_t *r0,
+                     int32_t *s0, int32_t *n0) {
   for (int l = 0; l < nl; l++)
     if (r1[l] != r0[l] || s1[l] != s0[l] || n1[l] != n0[l])
       return 0;
@@ -113,18 +113,18 @@ static void encode_lob(struct Row *rows, int64_t n, int64_t start_tick,
   for (int64_t i = 1; i < n; i++) {
     struct Row *cur = &rows[i];
     struct Row *prev = &rows[i - 1];
-    int ask_same = same_side(cur->aR, cur->aS, cur->aN,
-                             prev->aR, prev->aS, prev->aN);
-    int bid_same = same_side(cur->bR, cur->bS, cur->bN,
-                             prev->bR, prev->bS, prev->bN);
+    int ask_same =
+        same_side(cur->aR, cur->aS, cur->aN, prev->aR, prev->aS, prev->aN);
+    int bid_same =
+        same_side(cur->bR, cur->bS, cur->bN, prev->bR, prev->bS, prev->bN);
     uint8_t flags = (uint8_t)((!ask_same ? 1 : 0) | (!bid_same ? 2 : 0));
     w_u8(out, flags);
     if (!ask_same)
-      encode_side(out, cur->aR, cur->aS, cur->aN, prev->aR,
-                  prev->aS, prev->aN, 1);
+      encode_side(out, cur->aR, cur->aS, cur->aN, prev->aR, prev->aS, prev->aN,
+                  1);
     if (!bid_same)
-      encode_side(out, cur->bR, cur->bS, cur->bN, prev->bR,
-                  prev->bS, prev->bN, 0);
+      encode_side(out, cur->bR, cur->bS, cur->bN, prev->bR, prev->bS, prev->bN,
+                  0);
     w_i16(out, (int16_t)cur->y);
   }
 }

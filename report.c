@@ -44,8 +44,7 @@ int main(int argc, char **argv) {
     levels[i] = 0;
   }
   static char names[nf][16];
-  char *gnames[6] = {"aR", "bR", "aS",
-                     "bS", "aN",   "bN"};
+  char *gnames[6] = {"aR", "bR", "aS", "bS", "aN", "bN"};
   int g, j;
   for (g = 0; g < 6; g++)
     for (j = 0; j < nl; j++)

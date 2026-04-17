@@ -43,10 +43,10 @@ static void emit(int64_t tick, struct Row *r, struct Row *last) {
   *last = *r;
 }
 
-static void walk(int64_t tick, struct Row *out, struct Row *last,
-                 int32_t *oR, int32_t *oN, int32_t *oS, int32_t *pR,
-                 int32_t *pN, int32_t *pS, int32_t *cR, int32_t *cN,
-                 int32_t *cS, int (*diff)(int32_t, int32_t)) {
+static void walk(int64_t tick, struct Row *out, struct Row *last, int32_t *oR,
+                 int32_t *oN, int32_t *oS, int32_t *pR, int32_t *pN,
+                 int32_t *pS, int32_t *cR, int32_t *cN, int32_t *cS,
+                 int (*diff)(int32_t, int32_t)) {
   int i = 0, j = 0;
   int32_t d, dn, ds, dir, steps, k, saved_cN, saved_cS;
   while (i < nl && j < nl) {

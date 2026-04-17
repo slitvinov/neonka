@@ -183,12 +183,12 @@ int main(int argc, char **argv) {
       } else {
         *bc = *bp;
         if (flags & 1)
-          if (decode_side(in, bc->aR, bc->aN, bc->aS, bp->aR,
-                          bp->aN, bp->aS, 1) != 0)
+          if (decode_side(in, bc->aR, bc->aN, bc->aS, bp->aR, bp->aN, bp->aS,
+                          1) != 0)
             goto fail;
         if (flags & 2)
-          if (decode_side(in, bc->bR, bc->bN, bc->bS, bp->bR,
-                          bp->bN, bp->bS, 0) != 0)
+          if (decode_side(in, bc->bR, bc->bN, bc->bS, bp->bR, bp->bN, bp->bS,
+                          0) != 0)
             goto fail;
       }
       int16_t y16;

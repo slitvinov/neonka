@@ -71,8 +71,7 @@ int main(int argc, char **argv) {
       i++;
     }
     if (i != nf) {
-      fprintf(stderr,
-              "convert.c: error: row %lld has %d fields, expected %d\n",
+      fprintf(stderr, "convert.c: error: row %lld has %d fields, expected %d\n",
               nr + 1, i, nf);
       return 1;
     }
