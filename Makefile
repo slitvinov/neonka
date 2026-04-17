@@ -3,6 +3,6 @@
 .c:
 	cc -O2 -Wall -o $@ $<
 
-all: convert csv validate report encode decode split session offset stride flip center overlap events pairs
+all: convert csv validate report encode decode split session offset stride flip center overlap events pairs replay
 clean:
-	rm -f convert csv validate report encode decode split session offset stride flip center overlap events pairs
+	rm -f convert csv validate report encode decode split session offset stride flip center overlap events pairs replay
