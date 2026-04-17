@@ -42,7 +42,7 @@ static void emit_y(int32_t val) {
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
-  const char *groups[6] = {"askRate", "bidRate", "askSize",
+  char *groups[6] = {"askRate", "bidRate", "askSize",
                            "bidSize", "askNc",   "bidNc"};
   int first = 1, g, k;
   struct Row r;

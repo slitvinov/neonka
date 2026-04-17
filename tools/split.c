@@ -15,7 +15,7 @@ struct Row {
   int32_t y;
 };
 
-static int overlap8(const int32_t *a, const int32_t *b) {
+static int overlap8(int32_t *a, int32_t *b) {
   int n = 0;
   for (int j = 0; j < nl; j++) {
     for (int k = 0; k < nl; k++)

@@ -16,7 +16,7 @@ struct Row {
 };
 
 int main(int argc, char **argv) {
-  const char *spath = NULL;
+  char *spath = NULL;
   long sid = -1;
   int i;
   for (i = 1; i < argc; i++) {

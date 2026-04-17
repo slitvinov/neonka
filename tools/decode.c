@@ -6,13 +6,13 @@
 enum { nl = 8 };
 
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
 static int r_u8(FILE *f, uint8_t *v) { return fread(v, 1, 1, f) == 1 ? 0 : -1; }
@@ -21,6 +21,16 @@ static int r_i16(FILE *f, int16_t *v) {
   if (fread(b, 1, 2, f) != 2)
     return -1;
   *v = (int16_t)(b[0] | ((uint16_t)b[1] << 8));
+  return 0;
+}
+static int r_i32(FILE *f, int32_t *v) {
+  uint8_t b[4];
+  if (fread(b, 1, 4, f) != 4)
+    return -1;
+  uint32_t u = 0;
+  for (int i = 0; i < 4; i++)
+    u |= (uint32_t)b[i] << (8 * i);
+  *v = (int32_t)u;
   return 0;
 }
 static int r_i64(FILE *f, int64_t *v) {
@@ -34,9 +44,8 @@ static int r_i64(FILE *f, int64_t *v) {
   return 0;
 }
 
-static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
-                       const int16_t *or_, const int16_t *onc,
-                       const int16_t *os_, int asc) {
+static int decode_side(FILE *f, int32_t *nr, int32_t *nnc, int32_t *ns_,
+                       int32_t *or_, int32_t *onc, int32_t *os_, int asc) {
   int sign = asc ? -1 : 1;
   int j = 0, k = 0;
 
@@ -79,14 +88,15 @@ static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
         k++;
       }
       nr[k] = or_[j];
-      nnc[k] = (int16_t)(onc[j] + dnc);
-      ns_[k] = (int16_t)(os_[j] + dsz);
+      nnc[k] = onc[j] + dnc;
+      ns_[k] = os_[j] + dsz;
       j++;
       k++;
     } else if (op == 3) {
       uint8_t skip;
-      int16_t price, inc, isz;
-      if (r_u8(f, &skip) != 0 || r_i16(f, &price) != 0 || r_i16(f, &inc) != 0 ||
+      int32_t price;
+      int16_t inc, isz;
+      if (r_u8(f, &skip) != 0 || r_i32(f, &price) != 0 || r_i16(f, &inc) != 0 ||
           r_i16(f, &isz) != 0)
         return -1;
       for (int s = 0; s < (int)skip; s++) {
@@ -96,8 +106,8 @@ static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
         j++;
         k++;
       }
-      int ref = k > 0 ? nr[k - 1] : or_[j];
-      nr[k] = (int16_t)(ref + price * sign);
+      int32_t ref = k > 0 ? nr[k - 1] : or_[j];
+      nr[k] = ref + price * sign;
       nnc[k] = inc;
       ns_[k] = isz;
       k++;
@@ -113,11 +123,12 @@ static int decode_side(FILE *f, int16_t *nr, int16_t *nnc, int16_t *ns_,
         k++;
       }
       for (int ri = 0; ri < (int)nrev; ri++) {
-        int16_t dist, rnc, rsz;
-        if (r_i16(f, &dist) || r_i16(f, &rnc) || r_i16(f, &rsz))
+        int32_t dist;
+        int16_t rnc, rsz;
+        if (r_i32(f, &dist) || r_i16(f, &rnc) || r_i16(f, &rsz))
           return -1;
-        int ref = k > 0 ? nr[k - 1] : (j > 0 ? or_[j - 1] : or_[0]);
-        nr[k] = (int16_t)(ref - dist * sign);
+        int32_t ref = k > 0 ? nr[k - 1] : (j > 0 ? or_[j - 1] : or_[0]);
+        nr[k] = ref - dist * sign;
         nnc[k] = rnc;
         ns_[k] = rsz;
         k++;
@@ -146,16 +157,16 @@ int main(int argc, char **argv) {
     struct Row *b0 = &books[cur];
     memset(b0, 0, sizeof *b0);
     for (int l = 0; l < nl; l++) {
-      if (r_i16(in, &b0->askRate[l]) || r_i16(in, &b0->askNC[l]) ||
-          r_i16(in, &b0->askSize[l]))
+      if (r_i32(in, &b0->askRate[l]) || r_i32(in, &b0->askNC[l]) ||
+          r_i32(in, &b0->askSize[l]))
         goto fail;
     }
     for (int l = 0; l < nl; l++) {
-      if (r_i16(in, &b0->bidRate[l]) || r_i16(in, &b0->bidNC[l]) ||
-          r_i16(in, &b0->bidSize[l]))
+      if (r_i32(in, &b0->bidRate[l]) || r_i32(in, &b0->bidNC[l]) ||
+          r_i32(in, &b0->bidSize[l]))
         goto fail;
     }
-    if (r_i16(in, &b0->y) != 0)
+    if (r_i32(in, &b0->y) != 0)
       goto fail;
     fwrite(b0, sizeof(struct Row), 1, out);
     total++;
@@ -164,7 +175,7 @@ int main(int argc, char **argv) {
       prv = cur;
       cur = 1 - cur;
       struct Row *bc = &books[cur];
-      const struct Row *bp = &books[prv];
+      struct Row *bp = &books[prv];
 
       uint8_t flags;
       if (r_u8(in, &flags) != 0) {
@@ -186,8 +197,10 @@ int main(int argc, char **argv) {
                           bp->bidNC, bp->bidSize, 0) != 0)
             goto fail;
       }
-      if (r_i16(in, &bc->y) != 0)
+      int16_t y16;
+      if (r_i16(in, &y16) != 0)
         goto fail;
+      bc->y = y16;
       fwrite(bc, sizeof(struct Row), 1, out);
     }
     total += n_ticks - 1;

@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
   struct Row r;
   long long nr = 0;
   long long nzm = 0, nncs = 0, nsrt = 0, ncross = 0;
-  const char *gnames[6] = {"askRate", "bidRate", "askSize",
+  char *gnames[6] = {"askRate", "bidRate", "askSize",
                            "bidSize", "askNC",   "bidNC"};
   while (fread(&r, sizeof r, 1, stdin) == 1) {
     int32_t *groups[6] = {r.askRate, r.bidRate, r.askSize,

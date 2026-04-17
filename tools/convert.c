@@ -9,7 +9,7 @@
 enum { nf = 49, nl = 8 };
 enum { ASKSIZE = 2 * nl, Y = 6 * nl };
 
-static long float_to_long(const char *field, char **end, int scale) {
+static long float_to_long(char *field, char **end, int scale) {
   float val;
   long lval;
   double scaled;

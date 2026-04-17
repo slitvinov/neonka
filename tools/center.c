@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
   int i;
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
-      const char *a = argv[++i];
+      char *a = argv[++i];
       if (strcmp(a, "own") == 0)
         mode = OWN;
       else if (strcmp(a, "opp") == 0)
