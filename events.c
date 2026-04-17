@@ -12,9 +12,15 @@ struct Row {
 static int diff_ask(int32_t a, int32_t b) { return a - b; }
 static int diff_bid(int32_t a, int32_t b) { return b - a; }
 
-static void walk(int32_t *pR, int32_t *pN, int32_t *pS, int32_t *cR,
-                 int32_t *cN, int32_t *cS, int (*diff)(int32_t, int32_t),
-                 int64_t *tbl[2][2], int64_t *r) {
+static void walk(struct Row *prev, struct Row *cur, int side,
+                 int (*diff)(int32_t, int32_t), int64_t *tbl[2][2],
+                 int64_t *r) {
+  int32_t *pR = side ? prev->bR : prev->aR;
+  int32_t *pN = side ? prev->bN : prev->aN;
+  int32_t *pS = side ? prev->bS : prev->aS;
+  int32_t *cR = side ? cur->bR : cur->aR;
+  int32_t *cN = side ? cur->bN : cur->aN;
+  int32_t *cS = side ? cur->bS : cur->aS;
   int i = 0, j = 0;
   int32_t dn, ds, d;
   while (i < nl && j < nl && pN[i] != 0 && cN[j] != 0) {
@@ -59,8 +65,8 @@ int main(int argc, char **argv) {
       n++;
       continue;
     }
-    walk(prev.aR, prev.aN, prev.aS, cur.aR, cur.aN, cur.aS, diff_ask, tbl, &r);
-    walk(prev.bR, prev.bN, prev.bS, cur.bR, cur.bN, cur.bS, diff_bid, tbl, &r);
+    walk(&prev, &cur, 0, diff_ask, tbl, &r);
+    walk(&prev, &cur, 1, diff_bid, tbl, &r);
   }
   printf("%10lld %10lld %10lld %10lld %10lld %10lld %10lld\n", (long long)ntics,
          (long long)tp, (long long)tm, (long long)dp, (long long)dm,
