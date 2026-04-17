@@ -1,9 +1,3 @@
-/* overlap.c — pass-through filter; reports (na, nb) overlap histogram
- * Usage: overlap < <input.raw> > <output.raw>
- * For each consecutive tick pair counts na = |askRate_{t-1} intersect
- * askRate_t| and nb = |bidRate_{t-1} intersect bidRate_t|, both in [0, 8].
- * At EOF writes the 9x9 joint histogram to stderr (nb on columns).
- */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

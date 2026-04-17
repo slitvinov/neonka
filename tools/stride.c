@@ -1,6 +1,3 @@
-/* stride.c — keep every N-th row
- * Usage: stride -n N < <input.raw> > <output.raw>
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

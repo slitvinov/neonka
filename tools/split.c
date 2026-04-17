@@ -1,8 +1,3 @@
-/* split.c — detect session boundaries via level-overlap test
- * Usage: split < <train.raw> > <sessions.raw>
- * Writes int64 boundary indices to stdout (session starts + total row count).
- * Overlap statistics are reported by overlap.c.
- */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

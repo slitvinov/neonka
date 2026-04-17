@@ -1,6 +1,3 @@
-/* encode.c — LOB encoder (stream)
- * Usage: encode < <input.raw> > <output.lob>
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

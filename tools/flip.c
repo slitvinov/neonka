@@ -1,11 +1,3 @@
-/* flip.c — mirror the book: swap ask <-> bid and negate rates
- * Usage: flip < <input.raw> > <output.raw>
- * Rates are centred around 0 (stored as round(price*2) - RATE_BASE), so
- * negating them mirrors prices around mid; combined with the ask/bid swap
- * this preserves the ask-ascending / bid-descending sort invariants.  y is
- * mid-price change, also negated.  Size and NC are magnitudes, only swapped.
- * flip is an involution: flip | flip = identity.
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

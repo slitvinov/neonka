@@ -1,12 +1,3 @@
-/* center.c — shift rates so that a chosen reference sits at 0
- * Usage: center -r own|opp|mid < <input.raw> > <output.raw>
- *   own : subtract askRate[0]           (rate unit unchanged: 1/2 tick)
- *   opp : subtract bidRate[0]           (rate unit unchanged: 1/2 tick)
- *   mid : 2*rate - (askRate[0]+bidRate[0])   (rate unit halves: 1/4 tick,
- *         matching y's 1/4-tick scale so y is left unchanged)
- * Size and NC are unchanged.  Breaks absolute-price invariants; downstream
- * reads this as distance-from-reference.
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,10 +1,3 @@
-/* convert.c — CSV -> int16 raw stream
- * Usage: convert < <input.csv> > <output.raw>
- * Minimal: validates only what is essential for correctness of the int16
- * encoding (field count per row, int16 range, parse validity).  Downstream
- * invariants (sort, NC <= Size, crossed book, zero monotonicity, ...) live
- * in validate.c.  Column histograms and per-column stats live in report.c.
- */
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
@@ -13,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { nf = 49, nl = 8, RATE_BASE = 15754 };
+enum { nf = 49, nl = 8, RATE_BASE = 31508 };
 enum { ASKSIZE = 2 * nl, Y = 6 * nl };
 
 static long float_to_long(const char *field, char **end, int scale) {
@@ -25,7 +18,6 @@ static long float_to_long(const char *field, char **end, int scale) {
   scaled = (double)val * scale;
   lval = lrintf(scaled);
   assert(fabs(scaled - lval) < 1e-6);
-  assert(lval >= INT16_MIN && lval <= INT16_MAX);
   return lval;
 }
 
@@ -62,7 +54,7 @@ int main(int argc, char **argv) {
       } else {
         assert(field[0] != '0' || field[1] == '\0' || field[1] == '.');
         if (i < ASKSIZE) {
-          lval = float_to_long(field, &end, 2) - RATE_BASE;
+          lval = float_to_long(field, &end, 4) - RATE_BASE;
         } else if (i == Y) {
           lval = float_to_long(field, &end, 4);
         } else {

@@ -1,6 +1,3 @@
-/* session.c — pass through rows belonging to one session
- * Usage: session -S <sessions.raw> -s <N> < <train.raw> > <out.raw>
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

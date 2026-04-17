@@ -1,9 +1,3 @@
-/* report.c — pass-through raw filter; prints per-column stats at EOF
- * Usage: report < <input.raw> > <output.raw>
- * Passes int16 rows unchanged; at EOF writes to stderr:
- *   col  min  max  zeros  levels
- * where `levels` is the number of distinct int16 values observed.
- */
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>

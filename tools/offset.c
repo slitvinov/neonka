@@ -1,6 +1,3 @@
-/* offset.c — skip first N rows, pass rest
- * Usage: offset -n N < <input.raw> > <output.raw>
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,17 +1,3 @@
-/* validate.c — pass-through raw filter; reports data-integrity violations
- * Usage: validate < <input.raw> > <output.raw>
- * Reads int16 rows (convert.c output), passes them through unchanged on
- * stdout, and reports violations to stderr:
- *   - zero monotonicity  (within each of the 6 level groups, once a value
- *                         is 0 all deeper levels must be 0; encodes both
- *                         the old "NaN monotonicity" and "NC zero
- *                         monotonicity" under the raw 0==NaN convention)
- *   - NC > Size          (order count cannot exceed aggregate size)
- *   - rate sort          (askRate ascending, bidRate descending; skip
- *                         comparisons involving a zero slot)
- *   - crossed book       (askRate[0] < bidRate[0] at both-nonzero level)
- * The tool never exits nonzero for violations; a summary is printed at EOF.
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,6 +1,3 @@
-/* decode.c — LOB decoder (stream)
- * Usage: decode < <input.lob> > <output.raw>
- */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
