@@ -26,11 +26,7 @@ static void walk(int32_t *pR, int32_t *pN, int32_t *pS, int32_t *cR,
       dn = cN[j] - pN[i];
       ds = cS[j] - pS[i];
       if (dn)
-<<<<<<< HEAD
         (*tbl[j != 0][dn < 0]) += dn < 0 ? -dn : dn;
-=======
-        (*tbl[j != 0][dn < 0]) += abs(dn);
->>>>>>> ba3d89e (up)
       else if (ds != 0)
         (*r)++;
       i++;
