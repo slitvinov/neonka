@@ -22,14 +22,14 @@ static void build(int32_t *oR, int32_t *oN, int32_t *oS, int32_t *pR,
       oS[k] = cS[k];
     } else {
       idx = k - j + i;
-      if (idx < nl) {
+      if (idx < nl && pN[idx] != 0) {
         oR[k] = pR[idx];
         oN[k] = pN[idx];
         oS[k] = pS[idx];
       } else {
-        oR[k] = 0;
-        oN[k] = 0;
-        oS[k] = 0;
+        oR[k] = cR[k];
+        oN[k] = cN[k];
+        oS[k] = cS[k];
       }
     }
   }
@@ -48,7 +48,7 @@ static void walk(int64_t tick, struct Row *out, struct Row *last,
                  int32_t *pN, int32_t *pS, int32_t *cR, int32_t *cN,
                  int32_t *cS, int (*diff)(int32_t, int32_t)) {
   int i = 0, j = 0;
-  int32_t d;
+  int32_t d, dn, ds, dir, steps, k, saved_cN, saved_cS;
   while (i < nl && j < nl) {
     if (pN[i] == 0 && cN[j] == 0)
       break;
@@ -58,15 +58,39 @@ static void walk(int64_t tick, struct Row *out, struct Row *last,
       d = 1;
     else
       d = diff(cR[j], pR[i]);
-    if (d < 0)
+    if (d < 0) {
       j++;
-    else if (d == 0) {
+      build(oR, oN, oS, pR, pN, pS, cR, cN, cS, i, j);
+      emit(tick, out, last);
+    } else if (d == 0) {
+      dn = cN[j] - pN[i];
+      ds = cS[j] - pS[i];
+      steps = dn < 0 ? -dn : dn;
+      if (steps == 0) {
+        i++;
+        j++;
+        build(oR, oN, oS, pR, pN, pS, cR, cN, cS, i, j);
+        emit(tick, out, last);
+      } else {
+        dir = dn > 0 ? 1 : -1;
+        saved_cN = cN[j];
+        saved_cS = cS[j];
+        for (k = 1; k <= steps; k++) {
+          cN[j] = pN[i] + k * dir;
+          cS[j] = pS[i] + (int32_t)((int64_t)ds * k / steps);
+          build(oR, oN, oS, pR, pN, pS, cR, cN, cS, i + 1, j + 1);
+          emit(tick, out, last);
+        }
+        cN[j] = saved_cN;
+        cS[j] = saved_cS;
+        i++;
+        j++;
+      }
+    } else {
       i++;
-      j++;
-    } else
-      i++;
-    build(oR, oN, oS, pR, pN, pS, cR, cN, cS, i, j);
-    emit(tick, out, last);
+      build(oR, oN, oS, pR, pN, pS, cR, cN, cS, i, j);
+      emit(tick, out, last);
+    }
   }
 }
 
