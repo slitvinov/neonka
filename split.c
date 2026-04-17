@@ -13,7 +13,7 @@ static int overlap8(int32_t *a, int32_t *b) {
   int n = 0;
   for (int j = 0; j < nl; j++) {
     for (int k = 0; k < nl; k++)
-      if (a[j] == b[k]) {
+      if (a[j] == b[k] && a[j] != 0 && a[k] != 0) {
         n++;
         break;
       }
@@ -34,12 +34,14 @@ int main(int argc, char **argv) {
   struct Row cur, prev;
   int64_t i = 0;
   int have_prev = 0;
+  int64_t C[MAXK][MAXK] = {0};
   emit_i64(0);
   while (fread(&cur, sizeof cur, 1, stdin) == 1) {
     if (have_prev) {
       int na = overlap8(prev.aR, cur.aR);
       int nb = overlap8(prev.bR, cur.bR);
       assert(na < MAXK && nb < MAXK);
+      C[na][nb]++;
       if (na + nb <= 4)
         emit_i64(i);
     }
@@ -48,5 +50,10 @@ int main(int argc, char **argv) {
     i++;
   }
   emit_i64(i);
+  for (int r = 0; r < MAXK; r++) {
+    for (int c = 0; c < MAXK; c++)
+      fprintf(stderr, "% 9lld ", (long long)C[r][c]);
+    fprintf(stderr, "\n");
+  }
   return 0;
 }
