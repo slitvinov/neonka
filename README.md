@@ -2,7 +2,8 @@
 
 ```
 $ md5sum data/train.raw data/train.lob.gz data/train.csv
-c90e36f26249d995bf2e059d411d8da4  data/train.raw
-d9588987765907f5d74be9febafe13b9  data/train.lob.gz
+8b9f8a864c77caa0e83523fa5a804b48  data/train.raw
+cfadc1524cd19afda7a64b8f30405e32  data/train.lob.gz
 0d92bf14fc90c1f89525d47bd31052e6  data/train.csv
 ```
+

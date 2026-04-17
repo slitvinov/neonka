@@ -16,6 +16,14 @@ struct Row {
 
 enum { OWN, OPP, MID };
 
+static void shift(struct Row *r, int32_t ref) {
+  int j;
+  for (j = 0; j < nl; j++) {
+    r->askRate[j] -= ref;
+    r->bidRate[j] -= ref;
+  }
+}
+
 int main(int argc, char **argv) {
   int mode = -1;
   int i;
@@ -33,37 +41,28 @@ int main(int argc, char **argv) {
         return 1;
       }
     } else {
-      fprintf(stderr, "usage: center -r own|opp|mid < <input.raw>\n");
+      fprintf(stderr, "usage: center -r own|opp|mid < <pair.raw>\n");
       return 1;
     }
   }
   if (mode < 0) {
-    fprintf(stderr, "usage: center -r own|opp|mid < <input.raw>\n");
+    fprintf(stderr, "usage: center -r own|opp|mid < <pair.raw>\n");
     return 1;
   }
-  struct Row r;
-  while (fread(&r, sizeof r, 1, stdin) == 1) {
-    int j;
-    if (mode == OWN) {
-      int32_t ref = r.askRate[0];
-      for (j = 0; j < nl; j++) {
-        r.askRate[j] -= ref;
-        r.bidRate[j] -= ref;
-      }
-    } else if (mode == OPP) {
-      int32_t ref = r.bidRate[0];
-      for (j = 0; j < nl; j++) {
-        r.askRate[j] -= ref;
-        r.bidRate[j] -= ref;
-      }
-    } else {
-      int32_t ref = (r.askRate[0] + r.bidRate[0]) / 2;
-      for (j = 0; j < nl; j++) {
-        r.askRate[j] -= ref;
-        r.bidRate[j] -= ref;
-      }
-    }
-    if (fwrite(&r, sizeof r, 1, stdout) != 1) {
+  struct Row prev, cur;
+  while (fread(&prev, sizeof prev, 1, stdin) == 1 &&
+         fread(&cur, sizeof cur, 1, stdin) == 1) {
+    int32_t ref;
+    if (mode == OWN)
+      ref = prev.askRate[0];
+    else if (mode == OPP)
+      ref = prev.bidRate[0];
+    else
+      ref = (prev.askRate[0] + prev.bidRate[0]) / 2;
+    shift(&prev, ref);
+    shift(&cur, ref);
+    if (fwrite(&prev, sizeof prev, 1, stdout) != 1 ||
+        fwrite(&cur, sizeof cur, 1, stdout) != 1) {
       fprintf(stderr, "center.c: error: fwrite failed\n");
       return 1;
     }

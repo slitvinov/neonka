@@ -15,24 +15,48 @@ struct Row {
   int32_t y;
 };
 
+static void help(char *p) {
+  fprintf(stderr,
+          "usage: %s -D <train.raw> -S <sessions.raw> -s <N>\n"
+          "\n"
+          "options:\n"
+          "  -D file   train data file\n"
+          "  -S file   sessions file (int64 boundaries from split)\n"
+          "  -s N      session index in [0, #sessions)\n"
+          "  -h        help\n",
+          p);
+}
+
 int main(int argc, char **argv) {
+  char *dpath = NULL;
   char *spath = NULL;
   long sid = -1;
   int i;
   for (i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-S") == 0 && i + 1 < argc)
-      spath = argv[++i];
-    else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc)
-      sid = atol(argv[++i]);
-    else {
-      fprintf(stderr,
-              "usage: session -S <sessions.raw> -s <N> < <train.raw>\n");
-      return 1;
+    char *f = argv[i];
+    if (strcmp(f, "-h") == 0) {
+      help(argv[0]);
+      return 0;
     }
+    if (strcmp(f, "-D") == 0 && i + 1 < argc) {
+      dpath = argv[++i];
+      continue;
+    }
+    if (strcmp(f, "-S") == 0 && i + 1 < argc) {
+      spath = argv[++i];
+      continue;
+    }
+    if (strcmp(f, "-s") == 0 && i + 1 < argc) {
+      sid = atol(argv[++i]);
+      continue;
+    }
+    fprintf(stderr, "session.c: error: unknown flag '%s'\n", f);
+    help(argv[0]);
+    return 1;
   }
-  if (spath == NULL || sid < 0) {
-    fprintf(stderr,
-            "usage: session -S <sessions.raw> -s <N> < <train.raw>\n");
+  if (dpath == NULL || spath == NULL || sid < 0) {
+    fprintf(stderr, "session.c: error: -D, -S, -s are required\n");
+    help(argv[0]);
     return 1;
   }
   FILE *sf = fopen(spath, "rb");
@@ -75,23 +99,31 @@ int main(int argc, char **argv) {
   int64_t beg = store[sid];
   int64_t end = store[sid + 1];
   free(store);
+  FILE *in = fopen(dpath, "rb");
+  if (in == NULL) {
+    fprintf(stderr, "session.c: error: fail to open '%s'\n", dpath);
+    return 1;
+  }
+  off_t off = (off_t)beg * (off_t)sizeof(struct Row);
+  if (fseeko(in, off, SEEK_SET) != 0) {
+    fprintf(stderr, "session.c: error: fseeko failed on '%s'\n", dpath);
+    fclose(in);
+    return 1;
+  }
   struct Row row;
   int64_t r;
-  for (r = 0; r < beg; r++) {
-    if (fread(&row, sizeof row, 1, stdin) != 1) {
-      fprintf(stderr, "session.c: error: short input while skipping\n");
-      return 1;
-    }
-  }
-  for (; r < end; r++) {
-    if (fread(&row, sizeof row, 1, stdin) != 1) {
-      fprintf(stderr, "session.c: error: short input while passing\n");
+  for (r = beg; r < end; r++) {
+    if (fread(&row, sizeof row, 1, in) != 1) {
+      fprintf(stderr, "session.c: error: short read on '%s'\n", dpath);
+      fclose(in);
       return 1;
     }
     if (fwrite(&row, sizeof row, 1, stdout) != 1) {
       fprintf(stderr, "session.c: error: fwrite failed\n");
+      fclose(in);
       return 1;
     }
   }
+  fclose(in);
   return 0;
 }
