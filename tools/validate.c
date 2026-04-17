@@ -5,13 +5,13 @@
 
 enum { nl = 8 };
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
 int main(int argc, char **argv) {
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
   const char *gnames[6] = {"askRate", "bidRate", "askSize",
                            "bidSize", "askNC",   "bidNC"};
   while (fread(&r, sizeof r, 1, stdin) == 1) {
-    int16_t *groups[6] = {r.askRate, r.bidRate, r.askSize,
+    int32_t *groups[6] = {r.askRate, r.bidRate, r.askSize,
                           r.bidSize, r.askNC,   r.bidNC};
     int g, j;
     for (g = 0; g < 6; g++) {

@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { nf = 49, nl = 8, RATE_BASE = 31508 };
+enum { nf = 49, nl = 8 };
 enum { ASKSIZE = 2 * nl, Y = 6 * nl };
 
 static long float_to_long(const char *field, char **end, int scale) {
@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
   char line[16384], *field, *end;
   long long nr;
   long lval;
-  int16_t ival;
+  int32_t ival;
   int i, n;
 
   if (argc > 1 && strcmp(argv[1], "-h") == 0) {
@@ -53,17 +53,15 @@ int main(int argc, char **argv) {
         lval = 0;
       } else {
         assert(field[0] != '0' || field[1] == '\0' || field[1] == '.');
-        if (i < ASKSIZE) {
-          lval = float_to_long(field, &end, 4) - RATE_BASE;
-        } else if (i == Y) {
+        if (i < ASKSIZE || i == Y) {
           lval = float_to_long(field, &end, 4);
         } else {
           lval = strtol(field, &end, 10);
           assert(*end == '\0');
-          assert(lval >= INT16_MIN && lval <= INT16_MAX);
         }
       }
-      ival = (int16_t)lval;
+      assert(lval >= INT32_MIN && lval <= INT32_MAX);
+      ival = (int32_t)lval;
       assert((long)ival == lval);
       if (fwrite(&ival, sizeof ival, 1, out) != 1) {
         fprintf(stderr, "convert.c: error: fwrite failed\n");

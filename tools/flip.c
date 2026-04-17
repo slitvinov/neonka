@@ -4,28 +4,28 @@
 
 enum { nl = 8 };
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
-static void swap(int16_t *a, int16_t *b) {
-  int16_t tmp[nl];
+static void swap(int32_t *a, int32_t *b) {
+  int32_t tmp[nl];
   memcpy(tmp, a, sizeof tmp);
   memcpy(a, b, sizeof tmp);
   memcpy(b, tmp, sizeof tmp);
 }
 
-static void swap_neg(int16_t *a, int16_t *b) {
+static void swap_neg(int32_t *a, int32_t *b) {
   int i;
   for (i = 0; i < nl; i++) {
-    int16_t t = a[i];
-    a[i] = (int16_t)-b[i];
-    b[i] = (int16_t)-t;
+    int32_t t = a[i];
+    a[i] = (int32_t)-b[i];
+    b[i] = (int32_t)-t;
   }
 }
 
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     swap_neg(r.askRate, r.bidRate);
     swap(r.askSize, r.bidSize);
     swap(r.askNC, r.bidNC);
-    r.y = (int16_t)-r.y;
+    r.y = (int32_t)-r.y;
     if (fwrite(&r, sizeof r, 1, stdout) != 1) {
       fprintf(stderr, "flip.c: error: fwrite failed\n");
       return 1;

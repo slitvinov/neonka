@@ -4,40 +4,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { nl = 8, RATE_BASE = 31508 };
+enum { nl = 8 };
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
-static void emit_rate(int16_t val, int is_nan) {
-  int num, q;
+static void emit_rate(int32_t val, int is_nan) {
   if (is_nan) {
     fputs("NaN", stdout);
     return;
   }
-  num = (int)val + RATE_BASE;
-  assert(num % 2 == 0);
-  q = num / 2;
-  if (q % 2 == 0)
-    printf("%d", q / 2);
+  assert(val % 2 == 0);
+  if (val % 4 == 0)
+    printf("%d", val / 4);
   else
-    printf("%d.5", q / 2);
+    printf("%d.5", val / 4);
 }
 
-static void emit_intnan(int16_t val, int is_nan) {
+static void emit_intnan(int32_t val, int is_nan) {
   if (is_nan)
     fputs("NaN", stdout);
   else
     printf("%d", (int)val);
 }
 
-static void emit_y(int16_t val) {
+static void emit_y(int32_t val) {
   double d = (double)val / 4.0;
   printf("%g", d);
 }

@@ -6,16 +6,16 @@
 
 enum { nl = 8, MAXK = nl + 1 };
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
-static int overlap8(const int16_t *a, const int16_t *b) {
+static int overlap8(const int32_t *a, const int32_t *b) {
   int n = 0, j, k;
   for (j = 0; j < nl; j++) {
     for (k = 0; k < nl; k++)

@@ -5,13 +5,13 @@
 
 enum { nl = 8 };
 struct Row {
-  int16_t askRate[nl];
-  int16_t bidRate[nl];
-  int16_t askSize[nl];
-  int16_t bidSize[nl];
-  int16_t askNC[nl];
-  int16_t bidNC[nl];
-  int16_t y;
+  int32_t askRate[nl];
+  int32_t bidRate[nl];
+  int32_t askSize[nl];
+  int32_t bidSize[nl];
+  int32_t askNC[nl];
+  int32_t bidNC[nl];
+  int32_t y;
 };
 
 enum { OWN, OPP, MID };
@@ -45,22 +45,22 @@ int main(int argc, char **argv) {
   while (fread(&r, sizeof r, 1, stdin) == 1) {
     int j;
     if (mode == OWN) {
-      int ref = r.askRate[0];
+      int32_t ref = r.askRate[0];
       for (j = 0; j < nl; j++) {
-        r.askRate[j] = (int16_t)(r.askRate[j] - ref);
-        r.bidRate[j] = (int16_t)(r.bidRate[j] - ref);
+        r.askRate[j] -= ref;
+        r.bidRate[j] -= ref;
       }
     } else if (mode == OPP) {
-      int ref = r.bidRate[0];
+      int32_t ref = r.bidRate[0];
       for (j = 0; j < nl; j++) {
-        r.askRate[j] = (int16_t)(r.askRate[j] - ref);
-        r.bidRate[j] = (int16_t)(r.bidRate[j] - ref);
+        r.askRate[j] -= ref;
+        r.bidRate[j] -= ref;
       }
     } else {
-      int ref = r.askRate[0] + r.bidRate[0];
+      int32_t ref = (r.askRate[0] + r.bidRate[0]) / 2;
       for (j = 0; j < nl; j++) {
-        r.askRate[j] = (int16_t)(2 * r.askRate[j] - ref);
-        r.bidRate[j] = (int16_t)(2 * r.bidRate[j] - ref);
+        r.askRate[j] -= ref;
+        r.bidRate[j] -= ref;
       }
     }
     if (fwrite(&r, sizeof r, 1, stdout) != 1) {
