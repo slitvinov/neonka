@@ -68,7 +68,8 @@ int main(int argc, char **argv) {
     walk(prev.aR, prev.aN, prev.aS, cur.aR, cur.aN, cur.aS, diff_ask, &ask);
     walk(prev.bR, prev.bN, prev.bS, cur.bR, cur.bN, cur.bS, diff_bid, &bid);
   }
-  long long out[] = {ntics, n, ask.tp + ask.tm + bid.tp + bid.tm};
+  long long out[] = {ntics, n, ask.tp, ask.tm, ask.dp, ask.dm, ask.r,
+                     bid.tp, bid.tm, bid.dp, bid.dm, bid.r};
   size_t i;
   for (i = 0; i < sizeof out / sizeof *out; i++) {
     if (i)
