@@ -6,13 +6,7 @@
 enum { nl = 8, CHUNK = 4096 };
 
 struct Row {
-  int32_t aR[nl];
-  int32_t bR[nl];
-  int32_t aS[nl];
-  int32_t bS[nl];
-  int32_t aN[nl];
-  int32_t bN[nl];
-  int32_t y;
+  int32_t aR[nl], bR[nl], aS[nl], bS[nl], aN[nl], bN[nl], y;
 };
 
 static void w_u8(FILE *f, uint8_t v) { fwrite(&v, 1, 1, f); }

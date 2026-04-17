@@ -7,13 +7,7 @@
 enum { nf = 49, nl = 8, HCAP = 16384 };
 
 struct Row {
-  int32_t aR[nl];
-  int32_t bR[nl];
-  int32_t aS[nl];
-  int32_t bS[nl];
-  int32_t aN[nl];
-  int32_t bN[nl];
-  int32_t y;
+  int32_t aR[nl], bR[nl], aS[nl], bS[nl], aN[nl], bN[nl], y;
 };
 
 struct HSet {
