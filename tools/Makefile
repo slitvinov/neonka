@@ -3,6 +3,6 @@
 .c:
 	cc -O2 -Wall -o $@ $<
 
-all: convert encode decode split session
+all: convert validate report encode decode split session offset stride flip center halftick overlap
 clean:
-	rm -f convert encode decode split session
+	rm -f convert validate report encode decode split session offset stride flip center halftick overlap
