@@ -6,12 +6,12 @@
 enum { nl = 8, CHUNK = 4096 };
 
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -105,32 +105,32 @@ static void encode_lob(struct Row *rows, int64_t n, int64_t start_tick,
   w_i64(out, n);
 
   for (int l = 0; l < nl; l++) {
-    w_i32(out, rows[0].askRate[l]);
-    w_i32(out, rows[0].askNC[l]);
-    w_i32(out, rows[0].askSize[l]);
+    w_i32(out, rows[0].aR[l]);
+    w_i32(out, rows[0].aN[l]);
+    w_i32(out, rows[0].aS[l]);
   }
   for (int l = 0; l < nl; l++) {
-    w_i32(out, rows[0].bidRate[l]);
-    w_i32(out, rows[0].bidNC[l]);
-    w_i32(out, rows[0].bidSize[l]);
+    w_i32(out, rows[0].bR[l]);
+    w_i32(out, rows[0].bN[l]);
+    w_i32(out, rows[0].bS[l]);
   }
   w_i32(out, rows[0].y);
 
   for (int64_t i = 1; i < n; i++) {
     struct Row *cur = &rows[i];
     struct Row *prev = &rows[i - 1];
-    int ask_same = same_side(cur->askRate, cur->askSize, cur->askNC,
-                             prev->askRate, prev->askSize, prev->askNC);
-    int bid_same = same_side(cur->bidRate, cur->bidSize, cur->bidNC,
-                             prev->bidRate, prev->bidSize, prev->bidNC);
+    int ask_same = same_side(cur->aR, cur->aS, cur->aN,
+                             prev->aR, prev->aS, prev->aN);
+    int bid_same = same_side(cur->bR, cur->bS, cur->bN,
+                             prev->bR, prev->bS, prev->bN);
     uint8_t flags = (uint8_t)((!ask_same ? 1 : 0) | (!bid_same ? 2 : 0));
     w_u8(out, flags);
     if (!ask_same)
-      encode_side(out, cur->askRate, cur->askSize, cur->askNC, prev->askRate,
-                  prev->askSize, prev->askNC, 1);
+      encode_side(out, cur->aR, cur->aS, cur->aN, prev->aR,
+                  prev->aS, prev->aN, 1);
     if (!bid_same)
-      encode_side(out, cur->bidRate, cur->bidSize, cur->bidNC, prev->bidRate,
-                  prev->bidSize, prev->bidNC, 0);
+      encode_side(out, cur->bR, cur->bS, cur->bN, prev->bR,
+                  prev->bS, prev->bN, 0);
     w_i16(out, (int16_t)cur->y);
   }
 }

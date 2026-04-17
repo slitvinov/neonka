@@ -4,12 +4,12 @@
 
 enum { nl = 8 };
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -34,9 +34,9 @@ int main(int argc, char **argv) {
   (void)argv;
   struct Row r;
   while (fread(&r, sizeof r, 1, stdin) == 1) {
-    swap_neg(r.askRate, r.bidRate);
-    swap(r.askSize, r.bidSize);
-    swap(r.askNC, r.bidNC);
+    swap_neg(r.aR, r.bR);
+    swap(r.aS, r.bS);
+    swap(r.aN, r.bN);
     r.y = (int32_t)-r.y;
     if (fwrite(&r, sizeof r, 1, stdout) != 1) {
       fprintf(stderr, "flip.c: error: fwrite failed\n");

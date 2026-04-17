@@ -6,12 +6,12 @@
 enum { nl = 8 };
 
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -157,13 +157,13 @@ int main(int argc, char **argv) {
     struct Row *b0 = &books[cur];
     memset(b0, 0, sizeof *b0);
     for (int l = 0; l < nl; l++) {
-      if (r_i32(in, &b0->askRate[l]) || r_i32(in, &b0->askNC[l]) ||
-          r_i32(in, &b0->askSize[l]))
+      if (r_i32(in, &b0->aR[l]) || r_i32(in, &b0->aN[l]) ||
+          r_i32(in, &b0->aS[l]))
         goto fail;
     }
     for (int l = 0; l < nl; l++) {
-      if (r_i32(in, &b0->bidRate[l]) || r_i32(in, &b0->bidNC[l]) ||
-          r_i32(in, &b0->bidSize[l]))
+      if (r_i32(in, &b0->bR[l]) || r_i32(in, &b0->bN[l]) ||
+          r_i32(in, &b0->bS[l]))
         goto fail;
     }
     if (r_i32(in, &b0->y) != 0)
@@ -189,12 +189,12 @@ int main(int argc, char **argv) {
       } else {
         *bc = *bp;
         if (flags & 1)
-          if (decode_side(in, bc->askRate, bc->askNC, bc->askSize, bp->askRate,
-                          bp->askNC, bp->askSize, 1) != 0)
+          if (decode_side(in, bc->aR, bc->aN, bc->aS, bp->aR,
+                          bp->aN, bp->aS, 1) != 0)
             goto fail;
         if (flags & 2)
-          if (decode_side(in, bc->bidRate, bc->bidNC, bc->bidSize, bp->bidRate,
-                          bp->bidNC, bp->bidSize, 0) != 0)
+          if (decode_side(in, bc->bR, bc->bN, bc->bS, bp->bR,
+                          bp->bN, bp->bS, 0) != 0)
             goto fail;
       }
       int16_t y16;

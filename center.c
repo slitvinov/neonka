@@ -5,12 +5,12 @@
 
 enum { nl = 8 };
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -19,8 +19,8 @@ enum { OWN, OPP, MID };
 static void shift(struct Row *r, int32_t ref) {
   int j;
   for (j = 0; j < nl; j++) {
-    r->askRate[j] -= ref;
-    r->bidRate[j] -= ref;
+    r->aR[j] -= ref;
+    r->bR[j] -= ref;
   }
 }
 
@@ -54,11 +54,11 @@ int main(int argc, char **argv) {
          fread(&cur, sizeof cur, 1, stdin) == 1) {
     int32_t ref;
     if (mode == OWN)
-      ref = prev.askRate[0];
+      ref = prev.aR[0];
     else if (mode == OPP)
-      ref = prev.bidRate[0];
+      ref = prev.bR[0];
     else
-      ref = (prev.askRate[0] + prev.bidRate[0]) / 2;
+      ref = (prev.aR[0] + prev.bR[0]) / 2;
     shift(&prev, ref);
     shift(&cur, ref);
     if (fwrite(&prev, sizeof prev, 1, stdout) != 1 ||

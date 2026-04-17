@@ -6,12 +6,12 @@
 
 enum { nl = 8 };
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   char *groups[6] = {"askRate", "bidRate", "askSize",
-                           "bidSize", "askNc",   "bidNc"};
+                     "bidSize", "askNc",   "bidNc"};
   int first = 1, g, k;
   struct Row r;
   int ask_nan[nl], bid_nan[nl];
@@ -57,33 +57,33 @@ int main(int argc, char **argv) {
 
   while (fread(&r, sizeof r, 1, stdin) == 1) {
     for (k = 0; k < nl; k++) {
-      ask_nan[k] = (r.askRate[k] == 0);
-      bid_nan[k] = (r.bidRate[k] == 0);
+      ask_nan[k] = (r.aR[k] == 0);
+      bid_nan[k] = (r.bR[k] == 0);
     }
     for (k = 0; k < nl; k++) {
       if (k > 0)
         putchar(',');
-      emit_rate(r.askRate[k], ask_nan[k]);
+      emit_rate(r.aR[k], ask_nan[k]);
     }
     for (k = 0; k < nl; k++) {
       putchar(',');
-      emit_rate(r.bidRate[k], bid_nan[k]);
+      emit_rate(r.bR[k], bid_nan[k]);
     }
     for (k = 0; k < nl; k++) {
       putchar(',');
-      emit_intnan(r.askSize[k], ask_nan[k]);
+      emit_intnan(r.aS[k], ask_nan[k]);
     }
     for (k = 0; k < nl; k++) {
       putchar(',');
-      emit_intnan(r.bidSize[k], bid_nan[k]);
+      emit_intnan(r.bS[k], bid_nan[k]);
     }
     for (k = 0; k < nl; k++) {
       putchar(',');
-      emit_intnan(r.askNC[k], 0);
+      emit_intnan(r.aN[k], 0);
     }
     for (k = 0; k < nl; k++) {
       putchar(',');
-      emit_intnan(r.bidNC[k], 0);
+      emit_intnan(r.bN[k], 0);
     }
     putchar(',');
     emit_y(r.y);

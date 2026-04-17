@@ -7,12 +7,12 @@
 enum { nf = 49, nl = 8, HCAP = 16384 };
 
 struct Row {
-  int32_t askRate[nl];
-  int32_t bidRate[nl];
-  int32_t askSize[nl];
-  int32_t bidSize[nl];
-  int32_t askNC[nl];
-  int32_t bidNC[nl];
+  int32_t aR[nl];
+  int32_t bR[nl];
+  int32_t aS[nl];
+  int32_t bS[nl];
+  int32_t aN[nl];
+  int32_t bN[nl];
   int32_t y;
 };
 
@@ -50,8 +50,8 @@ int main(int argc, char **argv) {
     levels[i] = 0;
   }
   static char names[nf][16];
-  char *gnames[6] = {"askRate", "bidRate", "askSize",
-                     "bidSize", "askNC",   "bidNC"};
+  char *gnames[6] = {"aR", "bR", "aS",
+                     "bS", "aN",   "bN"};
   int g, j;
   for (g = 0; g < 6; g++)
     for (j = 0; j < nl; j++)
