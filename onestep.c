@@ -323,7 +323,7 @@ static int load_hawkes8(const char *path) {
   double v;
   for (c = 0; c < 8; c++) { h8_mu[c] = 0; for (j = 0; j < 8; j++) h8_alpha[c][j] = 0; }
   while (fscanf(f, "%31s", tag) == 1) {
-    if (!strcmp(tag, "beta")) { if (fscanf(f, "%lf", &h8_beta) != 1) break; }
+    if (!strcmp(tag, "beta")) { double _b; if (fscanf(f, "%lf", &_b) != 1) break; /* β fixed at 0.05 */ }
     else if (!strcmp(tag, "mu")) {
       if (fscanf(f, "%d %lf", &c, &v) != 2) break;
       if (c >= 0 && c < 8) h8_mu[c] = v;

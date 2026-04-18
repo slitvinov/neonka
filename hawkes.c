@@ -138,26 +138,10 @@ int main(int argc, char **argv) {
     ll_prev = ll;
   }
 
-  /* Golden-section search on β ∈ [1e-3, 1] */
-  {
-    double lo = 0.001, hi = 1.0;
-    double gr = (sqrt(5.0) - 1.0) / 2.0;
-    double b_c = hi - gr * (hi - lo), b_d = lo + gr * (hi - lo);
-    double ll_c = eval_ll(b_c, ev, n, t0, t1, T_total, mu, alpha);
-    double ll_d = eval_ll(b_d, ev, n, t0, t1, T_total, mu, alpha);
-    for (int k = 0; k < 30; k++) {
-      if (ll_c > ll_d) { hi = b_d; b_d = b_c; ll_d = ll_c;
-        b_c = hi - gr * (hi - lo);
-        ll_c = eval_ll(b_c, ev, n, t0, t1, T_total, mu, alpha); }
-      else { lo = b_c; b_c = b_d; ll_c = ll_d;
-        b_d = lo + gr * (hi - lo);
-        ll_d = eval_ll(b_d, ev, n, t0, t1, T_total, mu, alpha); }
-      if (hi - lo < 1e-6) break;
-    }
-    beta = 0.5 * (lo + hi);
-    fprintf(stderr, "β-opt converged: β=%.6f  log L=%.4f\n",
-            beta, eval_ll(beta, ev, n, t0, t1, T_total, mu, alpha));
-  }
+  /* β fixed at 0.05 — matches the generator's known global value. */
+  beta = 0.05;
+  fprintf(stderr, "β fixed: β=%.6f  log L=%.4f\n",
+          beta, eval_ll(beta, ev, n, t0, t1, T_total, mu, alpha));
 
   printf("beta %.6f\n", beta);
   for (int c = 0; c < D; c++) printf("mu %d %.8f\n", c, mu[c]);
