@@ -5,14 +5,30 @@
 #include <string.h>
 #include <time.h>
 
-enum { nl = 8, TMAX = 500, SP_MAX = 64, HMAX = 256, HIDE = 64 };
+enum { nl = 8, TMAX = 500, SP_MAX = 64, HMAX = 2048, HIDE = 64, IMB_BINS = 6 };
+
+static int imb_bin(int32_t aN0, int32_t bN0, int32_t aN1, int32_t bN1) {
+  int b0;
+  int64_t s = (int64_t)aN0 + bN0;
+  int64_t d = (int64_t)aN0 - bN0;
+  if (s == 0)
+    b0 = 1;
+  else if (d * 5 < -s)
+    b0 = 0;
+  else if (d * 5 > s)
+    b0 = 2;
+  else
+    b0 = 1;
+  int s1 = (aN1 > bN1) ? 1 : 0;
+  return b0 * 2 + s1;
+}
 struct Row {
   int32_t aR[nl], bR[nl], aS[nl], bS[nl], aN[nl], bN[nl], y;
   int32_t aF[nl], bF[nl];
 };
 
 static struct Row hbuf[HMAX];
-static int hn = 0, hh = 0, lookback = 0;
+static int hn = 0, hh = 0, lookback = 0, nr_window = 0;
 static int32_t ahide[HIDE], bhide[HIDE];
 static int ahn = 0, bhn = 0;
 
@@ -21,6 +37,25 @@ static void hist_push(struct Row *r) {
   hh = (hh + 1) % HMAX;
   if (hn < HMAX)
     hn++;
+}
+
+static double recent_nr(int target_events) {
+  int max_scan = hn < 2 ? 0 : hn - 1;
+  if (max_scan < 1)
+    return -1.0;
+  int i, events = 0, total = 0;
+  for (i = 1; i <= max_scan; i++) {
+    int i0 = (hh - i - 1 + HMAX) % HMAX;
+    int i1 = (hh - i + HMAX) % HMAX;
+    if (memcmp(hbuf[i0].aR, hbuf[i1].aR, 48 * sizeof(int32_t)) != 0)
+      events++;
+    total++;
+    if (events >= target_events)
+      break;
+  }
+  if (total < 10)
+    return -1.0;
+  return (double)(total - events) / total;
 }
 
 static int cmp_asc(const void *a, const void *b) {
@@ -184,6 +219,14 @@ static double sample_dist(struct KV *t) {
 }
 
 static struct KV tp_rates, tm_rates, dp_rates, dm_rates, r_rates, n_rates;
+static struct KV tp_a[IMB_BINS], tp_b[IMB_BINS];
+static struct KV tm_a[IMB_BINS], tm_b[IMB_BINS];
+static struct KV dp_a[IMB_BINS], dp_b[IMB_BINS];
+static struct KV dm_a[IMB_BINS], dm_b[IMB_BINS];
+static struct KV n_imb[IMB_BINS];
+static int imb_tables_loaded = 0;
+static int queue_mode = 0;
+static struct KV q_a, q_b, q_ba, q_bb, q_mu_a, q_mu_b, q_nu_a, q_nu_b, q_n;
 static struct KV tp_own, dp_own;
 static struct KV tp_own_sp[SP_MAX], dp_own_sp[SP_MAX];
 
@@ -347,41 +390,108 @@ static int apply_dm(struct Row *r, int side) {
 
 static void simulate(struct Row *r, double T) {
   double t = 0;
+  int32_t sp0 = r->aR[0] - r->bR[0];
+  int32_t sp_limit = (sp0 > 0 ? sp0 : 2) * 10 + 100;
+  r->y = 0;
   while (t < T) {
     int32_t sp = r->aR[0] - r->bR[0];
-    if (r->aN[0] == 0 || r->bN[0] == 0)
+    if (r->aN[0] == 0 || r->bN[0] == 0) {
+      r->y = 1;
       break;
-    double rtp = lookup(&tp_rates, sp);
-    double rtm = lookup(&tm_rates, sp);
-    double rdp = lookup(&dp_rates, sp);
-    double rdm = lookup(&dm_rates, sp);
-    double total = rtp + rtm + rdp + rdm;
-    if (total <= 0)
+    }
+    if (sp > sp_limit || sp <= 0) {
+      r->y = 2;
       break;
-    if (n_rates.n > 0) {
-      double nr = lookup(&n_rates, sp);
+    }
+    double rates[8];
+    double total = 0;
+    if (queue_mode) {
+      int32_t aN0c = r->aN[0], bN0c = r->bN[0];
+      int32_t aNdc = 0, bNdc = 0;
+      int lv;
+      for (lv = 1; lv < nl; lv++) { aNdc += r->aN[lv]; bNdc += r->bN[lv]; }
+      rates[0] = lookup(&q_a,    sp);
+      rates[1] = lookup(&q_b,    sp);
+      rates[2] = lookup(&q_mu_a, sp) * aN0c;
+      rates[3] = lookup(&q_mu_b, sp) * bN0c;
+      rates[4] = lookup(&q_ba,   sp);
+      rates[5] = lookup(&q_bb,   sp);
+      rates[6] = lookup(&q_nu_a, sp) * aNdc;
+      rates[7] = lookup(&q_nu_b, sp) * bNdc;
+      int k;
+      for (k = 0; k < 8; k++) total += rates[k];
+      if (total <= 0) break;
+      double nr = lookup(&q_n, sp);
+      if (nr_window > 0) {
+        double nr_loc = recent_nr(nr_window);
+        if (nr_loc > 0) nr = nr_loc;
+      }
       if (nr > 0 && nr < 1) {
         double target = -log(nr);
         double scale = target / total;
-        rtp *= scale;
-        rtm *= scale;
-        rdp *= scale;
-        rdm *= scale;
+        for (k = 0; k < 8; k++) rates[k] *= scale;
         total = target;
       }
+    } else if (imb_tables_loaded) {
+      int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
+      rates[0] = lookup(&tp_a[im], sp); rates[1] = lookup(&tp_b[im], sp);
+      rates[2] = lookup(&tm_a[im], sp); rates[3] = lookup(&tm_b[im], sp);
+      rates[4] = lookup(&dp_a[im], sp); rates[5] = lookup(&dp_b[im], sp);
+      rates[6] = lookup(&dm_a[im], sp); rates[7] = lookup(&dm_b[im], sp);
+      int k;
+      for (k = 0; k < 8; k++) total += rates[k];
+      if (total <= 0) break;
+      double nr = lookup(&n_imb[im], sp);
+      if (nr_window > 0) {
+        double nr_loc = recent_nr(nr_window);
+        if (nr_loc > 0) nr = nr_loc;
+      }
+      if (nr > 0 && nr < 1) {
+        double target = -log(nr);
+        double scale = target / total;
+        for (k = 0; k < 8; k++) rates[k] *= scale;
+        total = target;
+      }
+    } else {
+      double rtp = lookup(&tp_rates, sp);
+      double rtm = lookup(&tm_rates, sp);
+      double rdp = lookup(&dp_rates, sp);
+      double rdm = lookup(&dm_rates, sp);
+      total = rtp + rtm + rdp + rdm;
+      if (total <= 0) break;
+      if (n_rates.n > 0) {
+        double nr = lookup(&n_rates, sp);
+        if (nr > 0 && nr < 1) {
+          double target = -log(nr);
+          double scale = target / total;
+          rtp *= scale; rtm *= scale; rdp *= scale; rdm *= scale;
+          total = target;
+        }
+      }
+      rates[0] = rtp/2; rates[1] = rtp/2;
+      rates[2] = rtm/2; rates[3] = rtm/2;
+      rates[4] = rdp/2; rates[5] = rdp/2;
+      rates[6] = rdm/2; rates[7] = rdm/2;
     }
     double dt = -log(drand48()) / total;
     if (t + dt > T)
       break;
     t += dt;
     double u = drand48() * total;
-    int side = drand48() < 0.5 ? 0 : 1;
-    if (u < rtp) {
+    double cum = 0;
+    int pick = 7, k;
+    for (k = 0; k < 8; k++) {
+      cum += rates[k];
+      if (u < cum) { pick = k; break; }
+    }
+    int side = pick & 1;
+    int type = pick >> 1;
+    if (type == 0) {
       apply_tp(r, side,
                (int32_t)sample_dist(pick_own(tp_own_sp, sp, &tp_own)));
-    } else if (u < rtp + rtm) {
+    } else if (type == 1) {
       apply_tm(r, side);
-    } else if (u < rtp + rtm + rdp) {
+    } else if (type == 2) {
       apply_dp(r, side,
                (int32_t)sample_dist(pick_own(dp_own_sp, sp, &dp_own)));
     } else {
@@ -409,6 +519,10 @@ int main(int argc, char **argv) {
       lookback = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-S") && i + 1 < argc)
       stride = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "-W") && i + 1 < argc)
+      nr_window = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "-Q"))
+      queue_mode = 1;
     else {
       fprintf(stderr, "onestep.c: error: unknown arg '%s'\n", argv[i]);
       return 1;
@@ -428,10 +542,43 @@ int main(int argc, char **argv) {
   load_kv(path, &r_rates);
   snprintf(path, sizeof path, "%s/n.rates", dir);
   load_kv(path, &n_rates);
+  if (queue_mode) {
+    snprintf(path, sizeof path, "%s/q.a.rates",    dir); load_kv(path, &q_a);
+    snprintf(path, sizeof path, "%s/q.b.rates",    dir); load_kv(path, &q_b);
+    snprintf(path, sizeof path, "%s/q.ba.rates",   dir); load_kv(path, &q_ba);
+    snprintf(path, sizeof path, "%s/q.bb.rates",   dir); load_kv(path, &q_bb);
+    snprintf(path, sizeof path, "%s/q.mu_a.rates", dir); load_kv(path, &q_mu_a);
+    snprintf(path, sizeof path, "%s/q.mu_b.rates", dir); load_kv(path, &q_mu_b);
+    snprintf(path, sizeof path, "%s/q.nu_a.rates", dir); load_kv(path, &q_nu_a);
+    snprintf(path, sizeof path, "%s/q.nu_b.rates", dir); load_kv(path, &q_nu_b);
+    snprintf(path, sizeof path, "%s/q.n.rates",    dir); load_kv(path, &q_n);
+  }
   snprintf(path, sizeof path, "%s/tp.own", dir);
   load_kv(path, &tp_own);
   snprintf(path, sizeof path, "%s/dp.own", dir);
   load_kv(path, &dp_own);
+  int im;
+  imb_tables_loaded = 1;
+  for (im = 0; im < IMB_BINS; im++) {
+    snprintf(path, sizeof path, "%s/tp.a.imb%d.rates", dir, im);
+    if (!load_kv(path, &tp_a[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/tp.b.imb%d.rates", dir, im);
+    if (!load_kv(path, &tp_b[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm.a.imb%d.rates", dir, im);
+    if (!load_kv(path, &tm_a[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm.b.imb%d.rates", dir, im);
+    if (!load_kv(path, &tm_b[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/dp.a.imb%d.rates", dir, im);
+    if (!load_kv(path, &dp_a[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/dp.b.imb%d.rates", dir, im);
+    if (!load_kv(path, &dp_b[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/dm.a.imb%d.rates", dir, im);
+    if (!load_kv(path, &dm_a[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/dm.b.imb%d.rates", dir, im);
+    if (!load_kv(path, &dm_b[im])) imb_tables_loaded = 0;
+    snprintf(path, sizeof path, "%s/n.imb%d.rates", dir, im);
+    load_kv(path, &n_imb[im]);
+  }
   int sp;
   for (sp = 0; sp < SP_MAX; sp++) {
     snprintf(path, sizeof path, "%s/tp.own.sp%d", dir, sp);
