@@ -77,6 +77,7 @@ static void emit(int32_t key, struct Bucket *b, int with_key) {
   putchar('\n');
 }
 
+enum { N0_MAX = 32 };
 int main(int argc, char **argv) {
   int bin_mode = 0, i;
   for (i = 1; i < argc; i++) {
@@ -85,6 +86,8 @@ int main(int argc, char **argv) {
         bin_mode = 1;
       else if (!strcmp(argv[i + 1], "sp0_imb"))
         bin_mode = 2;
+      else if (!strcmp(argv[i + 1], "sp0_n0"))
+        bin_mode = 3;
       else {
         fprintf(stderr, "rates.c: error: unknown bin '%s'\n", argv[i + 1]);
         return 1;
@@ -99,7 +102,10 @@ int main(int argc, char **argv) {
   struct Row prev, cur;
   struct Bucket one = {0};
   struct Bucket *buckets = NULL;
-  int nbuck = bin_mode == 2 ? SPMAX * IMB_BINS : bin_mode == 1 ? SPMAX : 0;
+  int nbuck = bin_mode == 3 ? SPMAX * N0_MAX
+            : bin_mode == 2 ? SPMAX * IMB_BINS
+            : bin_mode == 1 ? SPMAX
+            : 0;
   if (nbuck) {
     buckets = calloc(nbuck, sizeof *buckets);
     if (buckets == NULL) {
@@ -115,7 +121,10 @@ int main(int argc, char **argv) {
       int32_t sp = prev.aR[0] - prev.bR[0];
       if (sp < 0 || sp >= SPMAX)
         continue;
-      int idx = bin_mode == 2
+      int n0_a = prev.aN[0] < N0_MAX ? prev.aN[0] : N0_MAX - 1;
+      int idx = bin_mode == 3
+              ? sp * N0_MAX + n0_a
+              : bin_mode == 2
               ? sp * IMB_BINS + imb_bin(prev.aN[0], prev.bN[0],
                                         prev.aN[1], prev.bN[1])
               : sp;
@@ -156,6 +165,24 @@ int main(int argc, char **argv) {
                              bk->b_tm,  bk->b_dp, bk->b_dm, bk->b_r,
                              bk->sum_aN0, bk->sum_bN0,
                              bk->sum_aNd, bk->sum_bNd};
+          size_t j;
+          for (j = 0; j < sizeof out / sizeof *out; j++) {
+            if (j) putchar(' ');
+            printf("%10lld", out[j]);
+          }
+          putchar('\n');
+        }
+      }
+  } else if (bin_mode == 3) {
+    int sp, n0;
+    for (sp = 0; sp < SPMAX; sp++)
+      for (n0 = 0; n0 < N0_MAX; n0++) {
+        struct Bucket *bk = &buckets[sp * N0_MAX + n0];
+        if (bk->ntics > 0) {
+          printf("%6d %3d ", sp, n0);
+          long long out[] = {bk->ntics, bk->n,   bk->a_tp, bk->a_tm,
+                             bk->a_dp,  bk->a_dm, bk->a_r, bk->b_tp,
+                             bk->b_tm,  bk->b_dp, bk->b_dm, bk->b_r};
           size_t j;
           for (j = 0; j < sizeof out / sizeof *out; j++) {
             if (j) putchar(' ');

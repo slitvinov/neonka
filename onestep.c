@@ -226,7 +226,63 @@ static struct KV dm_a[IMB_BINS], dm_b[IMB_BINS];
 static struct KV n_imb[IMB_BINS];
 static int imb_tables_loaded = 0;
 static int queue_mode = 0;
-static struct KV q_a, q_b, q_ba, q_bb, q_mu_a, q_mu_b, q_nu_a, q_nu_b, q_n;
+static struct KV q_mu_a[IMB_BINS], q_mu_b[IMB_BINS];
+static struct KV q_nu_a[IMB_BINS], q_nu_b[IMB_BINS];
+static int qr_mode = 0;
+enum { N0_BINS = 32, SP_BINS = 64 };
+static double qr_rate[5][2][SP_BINS][N0_BINS];
+static double qr_n[SP_BINS][N0_BINS];
+static int qr_loaded = 0;
+static int load_qr(const char *dir) {
+  int k, s, ev;
+  char path[512];
+  for (ev = 0; ev < 5; ev++)
+    for (s = 0; s < 2; s++)
+      memset(qr_rate[ev][s], 0, sizeof qr_rate[ev][s]);
+  memset(qr_n, 0, sizeof qr_n);
+  const char *evs[5] = {"tp", "tm", "dp", "dm", "r"};
+  for (ev = 0; ev < 5; ev++) {
+    for (s = 0; s < 2; s++) {
+      snprintf(path, sizeof path, "%s/qr.%s.%c.rates", dir, evs[ev], s ? 'b' : 'a');
+      FILE *f = fopen(path, "r");
+      if (!f) return 0;
+      int sp, n0;
+      double rate;
+      while (fscanf(f, "%d %d %lf", &sp, &n0, &rate) == 3) {
+        if (sp >= 0 && sp < SP_BINS && n0 >= 0 && n0 < N0_BINS)
+          qr_rate[ev][s][sp][n0] = rate;
+      }
+      fclose(f);
+    }
+  }
+  snprintf(path, sizeof path, "%s/qr.n.rates", dir);
+  FILE *f = fopen(path, "r");
+  if (!f) return 0;
+  int sp, n0;
+  double rate;
+  while (fscanf(f, "%d %d %lf", &sp, &n0, &rate) == 3) {
+    if (sp >= 0 && sp < SP_BINS && n0 >= 0 && n0 < N0_BINS)
+      qr_n[sp][n0] = rate;
+  }
+  fclose(f);
+  return 1;
+}
+static double qr_lookup(int ev, int side, int sp, int n0) {
+  if (sp < 0) sp = 0; if (sp >= SP_BINS) sp = SP_BINS - 1;
+  if (n0 < 0) n0 = 0; if (n0 >= N0_BINS) n0 = N0_BINS - 1;
+  double r = qr_rate[ev][side][sp][n0];
+  if (r > 0) return r;
+  int d;
+  for (d = 1; d < N0_BINS; d++) {
+    int lo = n0 - d, hi = n0 + d;
+    if (lo >= 0 && qr_rate[ev][side][sp][lo] > 0) return qr_rate[ev][side][sp][lo];
+    if (hi < N0_BINS && qr_rate[ev][side][sp][hi] > 0) return qr_rate[ev][side][sp][hi];
+  }
+  return 0;
+}
+static int hawkes_on = 0;
+static double h_beta = 0.02, h_alpha = 0.2;
+static double h_mem_a[4], h_mem_b[4];
 static struct KV tp_own, dp_own;
 static struct KV tp_own_sp[SP_MAX], dp_own_sp[SP_MAX];
 
@@ -247,7 +303,16 @@ static void apply_tp(struct Row *r, int side, int32_t dist) {
     S[0]++;
     return;
   }
+  int32_t opp = side ? r->aR[0] : r->bR[0];
   int32_t newR = side ? R[0] + dist : R[0] - dist;
+  if ((side == 0 && newR <= opp) || (side == 1 && newR >= opp)) {
+    newR = side ? opp - 2 : opp + 2;
+    if ((side == 0 && newR <= opp) || (side == 1 && newR >= opp)) {
+      N[0]++;
+      S[0]++;
+      return;
+    }
+  }
   for (k = nl - 1; k > 0; k--) {
     R[k] = R[k - 1];
     N[k] = N[k - 1];
@@ -272,9 +337,15 @@ static void apply_dp(struct Row *r, int side, int32_t dist) {
   for (k = 1; k < nl; k++) {
     if (N[k] == 0)
       break;
-    if (F[k] == 0 && R[k] == newR) {
-      N[k]++;
-      S[k]++;
+    if (R[k] == newR) {
+      if (F[k] == 0) {
+        N[k]++;
+        S[k]++;
+      } else {
+        N[k] = 1;
+        S[k] = 1;
+        F[k] = 0;
+      }
       return;
     }
     int past = side ? (newR > R[k]) : (newR < R[k]);
@@ -393,6 +464,10 @@ static void simulate(struct Row *r, double T) {
   int32_t sp0 = r->aR[0] - r->bR[0];
   int32_t sp_limit = (sp0 > 0 ? sp0 : 2) * 10 + 100;
   r->y = 0;
+  if (hawkes_on) {
+    memset(h_mem_a, 0, sizeof h_mem_a);
+    memset(h_mem_b, 0, sizeof h_mem_b);
+  }
   while (t < T) {
     int32_t sp = r->aR[0] - r->bR[0];
     if (r->aN[0] == 0 || r->bN[0] == 0) {
@@ -405,29 +480,52 @@ static void simulate(struct Row *r, double T) {
     }
     double rates[8];
     double total = 0;
-    if (queue_mode) {
+    if (qr_mode && qr_loaded) {
+      int n0_a = r->aN[0] < N0_BINS ? r->aN[0] : N0_BINS - 1;
+      int n0_b = r->bN[0] < N0_BINS ? r->bN[0] : N0_BINS - 1;
+      int sp_c = sp < SP_BINS ? (sp < 0 ? 0 : sp) : SP_BINS - 1;
+      rates[0] = qr_lookup(0, 0, sp_c, n0_a);
+      rates[1] = qr_lookup(0, 1, sp_c, n0_b);
+      rates[2] = qr_lookup(1, 0, sp_c, n0_a);
+      rates[3] = qr_lookup(1, 1, sp_c, n0_b);
+      rates[4] = qr_lookup(2, 0, sp_c, n0_a);
+      rates[5] = qr_lookup(2, 1, sp_c, n0_b);
+      rates[6] = qr_lookup(3, 0, sp_c, n0_a);
+      rates[7] = qr_lookup(3, 1, sp_c, n0_b);
+      int k;
+      for (k = 0; k < 8; k++) total += rates[k];
+      if (total <= 0) break;
+      double nr = qr_n[sp_c][n0_a];
+      if (nr > 0 && nr < 1) {
+        double target = 1.0 - nr;
+        double scale = target / total;
+        for (k = 0; k < 8; k++) rates[k] *= scale;
+        total = target;
+      }
+    } else if (queue_mode && imb_tables_loaded) {
+      int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
       int32_t aN0c = r->aN[0], bN0c = r->bN[0];
       int32_t aNdc = 0, bNdc = 0;
       int lv;
       for (lv = 1; lv < nl; lv++) { aNdc += r->aN[lv]; bNdc += r->bN[lv]; }
-      rates[0] = lookup(&q_a,    sp);
-      rates[1] = lookup(&q_b,    sp);
-      rates[2] = lookup(&q_mu_a, sp) * aN0c;
-      rates[3] = lookup(&q_mu_b, sp) * bN0c;
-      rates[4] = lookup(&q_ba,   sp);
-      rates[5] = lookup(&q_bb,   sp);
-      rates[6] = lookup(&q_nu_a, sp) * aNdc;
-      rates[7] = lookup(&q_nu_b, sp) * bNdc;
+      rates[0] = lookup(&tp_a[im], sp);
+      rates[1] = lookup(&tp_b[im], sp);
+      rates[2] = lookup(&q_mu_a[im], sp) * aN0c;
+      rates[3] = lookup(&q_mu_b[im], sp) * bN0c;
+      rates[4] = lookup(&dp_a[im], sp);
+      rates[5] = lookup(&dp_b[im], sp);
+      rates[6] = lookup(&q_nu_a[im], sp) * aNdc;
+      rates[7] = lookup(&q_nu_b[im], sp) * bNdc;
       int k;
       for (k = 0; k < 8; k++) total += rates[k];
       if (total <= 0) break;
-      double nr = lookup(&q_n, sp);
+      double nr = lookup(&n_imb[im], sp);
       if (nr_window > 0) {
         double nr_loc = recent_nr(nr_window);
         if (nr_loc > 0) nr = nr_loc;
       }
       if (nr > 0 && nr < 1) {
-        double target = -log(nr);
+        double target = 1.0 - nr;
         double scale = target / total;
         for (k = 0; k < 8; k++) rates[k] *= scale;
         total = target;
@@ -447,7 +545,7 @@ static void simulate(struct Row *r, double T) {
         if (nr_loc > 0) nr = nr_loc;
       }
       if (nr > 0 && nr < 1) {
-        double target = -log(nr);
+        double target = 1.0 - nr;
         double scale = target / total;
         for (k = 0; k < 8; k++) rates[k] *= scale;
         total = target;
@@ -462,7 +560,7 @@ static void simulate(struct Row *r, double T) {
       if (n_rates.n > 0) {
         double nr = lookup(&n_rates, sp);
         if (nr > 0 && nr < 1) {
-          double target = -log(nr);
+          double target = 1.0 - nr;
           double scale = target / total;
           rtp *= scale; rtm *= scale; rdp *= scale; rdm *= scale;
           total = target;
@@ -473,9 +571,25 @@ static void simulate(struct Row *r, double T) {
       rates[4] = rdp/2; rates[5] = rdp/2;
       rates[6] = rdm/2; rates[7] = rdm/2;
     }
+    if (hawkes_on) {
+      int k;
+      double ab = h_alpha * h_beta;
+      for (k = 0; k < 4; k++) {
+        rates[2*k]   += ab * h_mem_a[k];
+        rates[2*k+1] += ab * h_mem_b[k];
+      }
+      total = 0;
+      for (k = 0; k < 8; k++) total += rates[k];
+      if (total <= 0) break;
+    }
     double dt = -log(drand48()) / total;
     if (t + dt > T)
       break;
+    if (hawkes_on) {
+      double f = exp(-h_beta * dt);
+      int k;
+      for (k = 0; k < 4; k++) { h_mem_a[k] *= f; h_mem_b[k] *= f; }
+    }
     t += dt;
     double u = drand48() * total;
     double cum = 0;
@@ -486,6 +600,9 @@ static void simulate(struct Row *r, double T) {
     }
     int side = pick & 1;
     int type = pick >> 1;
+    if (hawkes_on) {
+      if (side == 0) h_mem_a[type] += 1.0; else h_mem_b[type] += 1.0;
+    }
     if (type == 0) {
       apply_tp(r, side,
                (int32_t)sample_dist(pick_own(tp_own_sp, sp, &tp_own)));
@@ -523,6 +640,16 @@ int main(int argc, char **argv) {
       nr_window = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-Q"))
       queue_mode = 1;
+    else if (!strcmp(argv[i], "-X"))
+      qr_mode = 1;
+    else if (!strcmp(argv[i], "-H"))
+      hawkes_on = 1;
+    else if (!strcmp(argv[i], "-P"))
+      hawkes_on = 0;
+    else if (!strcmp(argv[i], "-A") && i + 1 < argc)
+      h_alpha = atof(argv[++i]);
+    else if (!strcmp(argv[i], "-B") && i + 1 < argc)
+      h_beta = atof(argv[++i]);
     else {
       fprintf(stderr, "onestep.c: error: unknown arg '%s'\n", argv[i]);
       return 1;
@@ -542,22 +669,24 @@ int main(int argc, char **argv) {
   load_kv(path, &r_rates);
   snprintf(path, sizeof path, "%s/n.rates", dir);
   load_kv(path, &n_rates);
+  int im;
+  if (qr_mode) qr_loaded = load_qr(dir);
   if (queue_mode) {
-    snprintf(path, sizeof path, "%s/q.a.rates",    dir); load_kv(path, &q_a);
-    snprintf(path, sizeof path, "%s/q.b.rates",    dir); load_kv(path, &q_b);
-    snprintf(path, sizeof path, "%s/q.ba.rates",   dir); load_kv(path, &q_ba);
-    snprintf(path, sizeof path, "%s/q.bb.rates",   dir); load_kv(path, &q_bb);
-    snprintf(path, sizeof path, "%s/q.mu_a.rates", dir); load_kv(path, &q_mu_a);
-    snprintf(path, sizeof path, "%s/q.mu_b.rates", dir); load_kv(path, &q_mu_b);
-    snprintf(path, sizeof path, "%s/q.nu_a.rates", dir); load_kv(path, &q_nu_a);
-    snprintf(path, sizeof path, "%s/q.nu_b.rates", dir); load_kv(path, &q_nu_b);
-    snprintf(path, sizeof path, "%s/q.n.rates",    dir); load_kv(path, &q_n);
+    for (im = 0; im < IMB_BINS; im++) {
+      snprintf(path, sizeof path, "%s/q_mu.a.imb%d.rates", dir, im);
+      load_kv(path, &q_mu_a[im]);
+      snprintf(path, sizeof path, "%s/q_mu.b.imb%d.rates", dir, im);
+      load_kv(path, &q_mu_b[im]);
+      snprintf(path, sizeof path, "%s/q_nu.a.imb%d.rates", dir, im);
+      load_kv(path, &q_nu_a[im]);
+      snprintf(path, sizeof path, "%s/q_nu.b.imb%d.rates", dir, im);
+      load_kv(path, &q_nu_b[im]);
+    }
   }
   snprintf(path, sizeof path, "%s/tp.own", dir);
   load_kv(path, &tp_own);
   snprintf(path, sizeof path, "%s/dp.own", dir);
   load_kv(path, &dp_own);
-  int im;
   imb_tables_loaded = 1;
   for (im = 0; im < IMB_BINS; im++) {
     snprintf(path, sizeof path, "%s/tp.a.imb%d.rates", dir, im);
