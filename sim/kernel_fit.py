@@ -233,6 +233,8 @@ for sid in range(62):
         g2, a2 = np.polyfit(logL[bi:], logY[bi:], 1)
         gamma_sh, gamma_lg = -g1, -g2
         if gamma_sh < gamma_lg - 0.05: continue       # enforce short ≥ long
+        if gamma_lg <= 0.02: continue                  # ACF must decay, not grow
+        if gamma_sh <= 0.02: continue
         pred = np.concatenate([a1 + g1*logL[:bi+1], a2 + g2*logL[bi+1:]])
         r2b = 1 - ((logY - pred)**2).sum() / sstot
         if r2b > best[0]:
