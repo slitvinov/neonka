@@ -21,7 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { D = 10 };
+enum { D = 10 };  /* 10 event types (tp/tm/dp/dm × ask/bid + hp_a, hp_b).
+                   * HP are observation artifacts of truncation, but INCLUDING
+                   * them in the fit gives better α[visible, visible] values
+                   * because α[visible, HP] absorbs hidden-source excitation
+                   * that would otherwise alias. Sim uses 8×8 subblock only. */
 
 struct Event { int32_t t, type; };
 
@@ -65,13 +69,15 @@ int main(int argc, char **argv) {
 
   size_t cap = 1 << 20, n = 0;
   struct Event *ev = malloc(cap * sizeof *ev);
+  struct Event tmp;
   while (1) {
+    if (fread(&tmp, sizeof tmp, 1, stdin) != 1) break;
+    if (tmp.type >= D) continue;
     if (n == cap) { cap *= 2; ev = realloc(ev, cap * sizeof *ev); }
-    if (fread(&ev[n], sizeof *ev, 1, stdin) != 1) break;
-    n++;
+    ev[n++] = tmp;
   }
   if (n == 0) { fprintf(stderr, "hawkes: no events\n"); return 1; }
-  fprintf(stderr, "hawkes: loaded %zu events\n", n);
+  fprintf(stderr, "hawkes: loaded %zu events (10-D incl. HP)\n", n);
 
   int32_t t0 = ev[0].t, t1 = ev[n-1].t + 1;
   double T_total = (double)(t1 - t0);

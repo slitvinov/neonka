@@ -313,49 +313,51 @@ static double h_beta = 0.02, h_alpha = 0.2;
 static double h_mem_a[4], h_mem_b[4];
 /* 8-D mutual-excitation Hawkes (from hawkes.c output) */
 static int h8_on = 0;
-static double h8_mu[8], h8_alpha[8][8], h8_beta = 0.05;
-static double h8_phi[8], h8_phi_stat[8];
+/* 10-D Hawkes state: 0..7 are visible event types that mutate the book,
+ * 8..9 are HP (hidden surfacing) — phantom firings that update φ only. */
+#define H_DIM 10
+static double h8_mu[H_DIM], h8_alpha[H_DIM][H_DIM], h8_beta = 0.05;
+static double h8_phi[H_DIM], h8_phi_stat[H_DIM];
 static int load_hawkes8(const char *path) {
   FILE *f = fopen(path, "r");
   if (!f) return 0;
   char tag[32];
   int c, j;
   double v;
-  for (c = 0; c < 8; c++) { h8_mu[c] = 0; for (j = 0; j < 8; j++) h8_alpha[c][j] = 0; }
+  for (c = 0; c < H_DIM; c++) { h8_mu[c] = 0; for (j = 0; j < H_DIM; j++) h8_alpha[c][j] = 0; }
   while (fscanf(f, "%31s", tag) == 1) {
     if (!strcmp(tag, "beta")) { double _b; if (fscanf(f, "%lf", &_b) != 1) break; /* β fixed at 0.05 */ }
     else if (!strcmp(tag, "mu")) {
       if (fscanf(f, "%d %lf", &c, &v) != 2) break;
-      if (c >= 0 && c < 8) h8_mu[c] = v;
+      if (c >= 0 && c < H_DIM) h8_mu[c] = v;
     } else if (!strcmp(tag, "alpha")) {
       if (fscanf(f, "%d %d %lf", &c, &j, &v) != 3) break;
-      if (c >= 0 && c < 8 && j >= 0 && j < 8) h8_alpha[c][j] = v;
+      if (c >= 0 && c < H_DIM && j >= 0 && j < H_DIM) h8_alpha[c][j] = v;
     } else break;
   }
   fclose(f);
-  /* Initialize phi to STATIONARY value: solve (I - α/β)·λ = μ for λ per type
-   * via Gauss elimination (ρ(α/β) ≈ 0.9 → fixed-point converges too slowly).
-   * Then phi_j = λ_j / β. */
-  double A[8][9]; /* augmented matrix [M | μ] */
-  for (int c_ = 0; c_ < 8; c_++) {
-    for (int j_ = 0; j_ < 8; j_++) A[c_][j_] = (c_ == j_ ? 1.0 : 0.0) - h8_alpha[c_][j_] / h8_beta;
-    A[c_][8] = h8_mu[c_];
+  /* Stationary λ via Gauss elimination on (I − α/β)·λ = μ, full H_DIM × H_DIM. */
+  double A[H_DIM][H_DIM + 1];
+  for (int c_ = 0; c_ < H_DIM; c_++) {
+    for (int j_ = 0; j_ < H_DIM; j_++) A[c_][j_] = (c_ == j_ ? 1.0 : 0.0) - h8_alpha[c_][j_] / h8_beta;
+    A[c_][H_DIM] = h8_mu[c_];
   }
-  for (int p = 0; p < 8; p++) {
+  for (int p = 0; p < H_DIM; p++) {
     int piv = p; double best = fabs(A[p][p]);
-    for (int r_ = p+1; r_ < 8; r_++) if (fabs(A[r_][p]) > best) { best = fabs(A[r_][p]); piv = r_; }
-    if (piv != p) for (int c_ = 0; c_ < 9; c_++) { double t = A[p][c_]; A[p][c_] = A[piv][c_]; A[piv][c_] = t; }
-    for (int r_ = 0; r_ < 8; r_++) if (r_ != p && A[r_][p] != 0.0) {
+    for (int r_ = p+1; r_ < H_DIM; r_++) if (fabs(A[r_][p]) > best) { best = fabs(A[r_][p]); piv = r_; }
+    if (piv != p) for (int c_ = 0; c_ < H_DIM+1; c_++) { double t = A[p][c_]; A[p][c_] = A[piv][c_]; A[piv][c_] = t; }
+    for (int r_ = 0; r_ < H_DIM; r_++) if (r_ != p && A[r_][p] != 0.0) {
       double f_ = A[r_][p] / A[p][p];
-      for (int c_ = p; c_ < 9; c_++) A[r_][c_] -= f_ * A[p][c_];
+      for (int c_ = p; c_ < H_DIM+1; c_++) A[r_][c_] -= f_ * A[p][c_];
     }
   }
-  for (j = 0; j < 8; j++) { h8_phi_stat[j] = (A[j][8] / A[j][j]) / h8_beta; h8_phi[j] = h8_phi_stat[j]; }
-  /* Single shared scale = Σμ / Σλ_stationary. Represents the baseline-vs-excitation
-   * split for the full process (not per-row — which is noisier and over-shrinks
-   * high-α rows on strongly self-exciting sessions like ses55). */
+  for (j = 0; j < H_DIM; j++) {
+    h8_phi_stat[j] = (A[j][H_DIM] / A[j][j]) / h8_beta;
+    h8_phi[j] = h8_phi_stat[j];
+  }
+  /* h8_row_scale only used for state-dep μ on visible types. */
   double total_mu = 0, total_stat = 0;
-  for (j = 0; j < 8; j++) { total_mu += h8_mu[j]; total_stat += h8_phi_stat[j] * h8_beta; }
+  for (j = 0; j < H_DIM; j++) { total_mu += h8_mu[j]; total_stat += h8_phi_stat[j] * h8_beta; }
   double shared_scale = (total_stat > 0) ? (total_mu / total_stat) : 1.0;
   if (shared_scale < 0.01) shared_scale = 0.01;
   if (shared_scale > 1.0) shared_scale = 1.0;
@@ -369,6 +371,63 @@ static struct KV tp_own_sp[SP_MAX], dp_own_sp[SP_MAX];
  * genuinely diffuse; otherwise default to dist=2 (the MAP for most sessions). */
 static struct KV refill_a, refill_b;
 static int refill_a_diffuse = 0, refill_b_diffuse = 0;
+/* Hybrid tail params for refill: fall back to continuous power-law k^α
+ * (k ≥ k_cutoff) with probability f_tail, to fill in the unseen region
+ * beyond the empirical histogram's support. */
+struct TailParam { double alpha; int k_cutoff; double f_tail; };
+static struct TailParam tail_a = {0.0, 0, 0.0};
+static struct TailParam tail_b = {0.0, 0, 0.0};
+
+static void load_tail_param(const char *path, struct TailParam *t) {
+  t->alpha = 0.0; t->k_cutoff = 0; t->f_tail = 0.0;
+  FILE *f = fopen(path, "r");
+  if (!f) return;
+  char tag[32]; double v; int iv;
+  while (fscanf(f, "%31s", tag) == 1) {
+    if (tag[0] == '#') { int c; while ((c = fgetc(f)) != '\n' && c != EOF); continue; }
+    if (!strcmp(tag, "alpha") && fscanf(f, "%lf", &v) == 1) t->alpha = v;
+    else if (!strcmp(tag, "k_cutoff") && fscanf(f, "%d", &iv) == 1) t->k_cutoff = iv;
+    else if (!strcmp(tag, "f_tail") && fscanf(f, "%lf", &v) == 1) t->f_tail = v;
+    else if (!strcmp(tag, "max_obs") && fscanf(f, "%d", &iv) == 1) (void)iv;
+    else { if (fscanf(f, "%lf", &v) != 1) break; }
+  }
+  fclose(f);
+}
+
+/* Sample from truncated power-law k^α on [k_cutoff, k_max], quantized to
+ * even ticks. Truncation cap k_max = 3·k_cutoff prevents extreme-extrapolation
+ * artifacts that otherwise inject mid-price jumps of hundreds of ticks. */
+static int32_t sample_tail(const struct TailParam *t) {
+  if (t->alpha >= -1.05 || t->k_cutoff <= 0) return (int32_t)t->k_cutoff;
+  int32_t k_max = 3 * t->k_cutoff;
+  double U = drand48(); if (U < 1e-12) U = 1e-12;
+  /* Inverse CDF of truncated power law on [a, b]:
+   *   F(k) = (k^(α+1) − a^(α+1)) / (b^(α+1) − a^(α+1))
+   *   k = ( U·(b^(α+1) − a^(α+1)) + a^(α+1) )^(1/(α+1))   */
+  double ap = pow((double)t->k_cutoff, t->alpha + 1.0);
+  double bp = pow((double)k_max,       t->alpha + 1.0);
+  double k  = pow(U * (bp - ap) + ap,   1.0 / (t->alpha + 1.0));
+  int32_t k_int = (int32_t)(k + 0.5);
+  if (k_int < t->k_cutoff) k_int = t->k_cutoff;
+  if (k_int > k_max) k_int = k_max;
+  if (k_int & 1) k_int++;                /* quantize to even tick */
+  return k_int;
+}
+
+/* Opt-in hybrid refill sampler: empirical histogram with prob (1 - f_tail·scale),
+ * parametric power-law extrapolation otherwise. Enabled by -H flag. */
+static int hybrid_tail_on = 0;
+static int32_t sample_refill(int side) {
+  int is_diffuse = side ? refill_b_diffuse : refill_a_diffuse;
+  struct KV *rf = side ? &refill_b : &refill_a;
+  const struct TailParam *tp = side ? &tail_b : &tail_a;
+  if (hybrid_tail_on && tp->f_tail > 0.0 && drand48() < tp->f_tail)
+    return sample_tail(tp);
+  int32_t dist = (is_diffuse && rf->n > 0) ? (int32_t)sample_dist(rf) : 2;
+  if (dist <= 0) dist = 2;
+  return dist;
+}
+
 static void set_refill_diffuse(struct KV *t, int *diffuse) {
   int i; double total = 0, mass_at_2 = 0;
   for (i = 0; i < t->n; i++) {
@@ -484,10 +543,7 @@ static void apply_tm(struct Row *r, int side) {
       S[nl - 1] = 1;
       F[nl - 1] = 0;
     } else if (N[nl - 2] > 0) {
-      int is_diffuse = side ? refill_b_diffuse : refill_a_diffuse;
-      struct KV *rf = side ? &refill_b : &refill_a;
-      int32_t dist = (is_diffuse && rf->n > 0) ? (int32_t)sample_dist(rf) : 2;
-      if (dist <= 0) dist = 2;
+      int32_t dist = sample_refill(side);
       R[nl - 1] = side ? R[nl - 2] - dist : R[nl - 2] + dist;
       N[nl - 1] = 1;
       S[nl - 1] = 1;
@@ -541,10 +597,7 @@ static int apply_dm(struct Row *r, int side) {
       S[nl - 1] = 1;
       F[nl - 1] = 0;
     } else if (N[nl - 2] > 0) {
-      int is_diffuse = side ? refill_b_diffuse : refill_a_diffuse;
-      struct KV *rf = side ? &refill_b : &refill_a;
-      int32_t dist = (is_diffuse && rf->n > 0) ? (int32_t)sample_dist(rf) : 2;
-      if (dist <= 0) dist = 2;
+      int32_t dist = sample_refill(side);
       R[nl - 1] = side ? R[nl - 2] - dist : R[nl - 2] + dist;
       N[nl - 1] = 1;
       S[nl - 1] = 1;
@@ -561,12 +614,12 @@ static int apply_dm(struct Row *r, int side) {
 
 /* Compute 8-type rates from current book state and Hawkes memory (state-dep μ +
  * time-decaying α·phi). Returns total; 0 if unusable. State is read-only. */
-static double compute_rates(struct Row *r, double rates[8]) {
+static double compute_rates(struct Row *r, double rates[H_DIM]) {
   int32_t sp = r->aR[0] - r->bR[0];
   double total = 0;
   if (h8_on && !hybrid_mode) {
     int k, j;
-    double mu_base[8];
+    double mu_base[H_DIM];
     if (state_mu_mode && imb_tables_loaded) {
       int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
       mu_base[0] = lookup(&tp_a[im], sp) * h8_row_scale[0];
@@ -577,12 +630,13 @@ static double compute_rates(struct Row *r, double rates[8]) {
       mu_base[5] = lookup(&dp_b[im], sp) * h8_row_scale[5];
       mu_base[6] = lookup(&dm_a[im], sp) * h8_row_scale[6];
       mu_base[7] = lookup(&dm_b[im], sp) * h8_row_scale[7];
+      for (k = 8; k < H_DIM; k++) mu_base[k] = h8_mu[k];   /* HP: raw μ */
     } else {
-      for (k = 0; k < 8; k++) mu_base[k] = h8_mu[k];
+      for (k = 0; k < H_DIM; k++) mu_base[k] = h8_mu[k];
     }
-    for (k = 0; k < 8; k++) {
+    for (k = 0; k < H_DIM; k++) {
       double rc = mu_base[k];
-      for (j = 0; j < 8; j++) rc += h8_alpha[k][j] * h8_phi[j];
+      for (j = 0; j < H_DIM; j++) rc += h8_alpha[k][j] * h8_phi[j];
       rates[k] = rc > 0 ? rc : 0;
       total += rates[k];
     }
@@ -702,18 +756,23 @@ static double compute_rates(struct Row *r, double rates[8]) {
   return total;
 }
 
+/* When 1, simulate() resets Hawkes memory at start (independent replication).
+ * When 0, memory is preserved across calls (continuous chained trajectory). */
+static int simulate_reset_phi = 1;
 static void simulate(struct Row *r, double T) {
   double t = 0;
   int32_t sp0 = r->aR[0] - r->bR[0];
   int32_t sp_limit = (sp0 > 0 ? sp0 : 2) * 10 + 100;
   r->y = 0;
-  if (hawkes_on) {
-    memset(h_mem_a, 0, sizeof h_mem_a);
-    memset(h_mem_b, 0, sizeof h_mem_b);
-  }
-  if (h8_on) {
-    int k;
-    for (k = 0; k < 8; k++) h8_phi[k] = h8_phi_stat[k];
+  if (simulate_reset_phi) {
+    if (hawkes_on) {
+      memset(h_mem_a, 0, sizeof h_mem_a);
+      memset(h_mem_b, 0, sizeof h_mem_b);
+    }
+    if (h8_on) {
+      int k;
+      for (k = 0; k < H_DIM; k++) h8_phi[k] = h8_phi_stat[k];
+    }
   }
   while (t < T) {
     int32_t sp = r->aR[0] - r->bR[0];
@@ -728,7 +787,8 @@ static void simulate(struct Row *r, double T) {
     /* Ogata thinning: sample dt ~ Exp(λ*) with λ* = total rate at t+ (upper
      * bound since Hawkes intensity only decays between events). Decay memory
      * to t+dt, recompute rates, accept event with prob λ(t+dt)/λ*. */
-    double rates[8];
+    double rates[H_DIM];
+    int n_rate = h8_on ? H_DIM : 8;       /* HP channels active only for -M 10-D fit */
     double total_star = compute_rates(r, rates);
     if (total_star <= 0) break;
     double dt = -log(drand48()) / total_star;
@@ -741,25 +801,29 @@ static void simulate(struct Row *r, double T) {
     if (h8_on) {
       double f = exp(-h8_beta * dt);
       int k;
-      for (k = 0; k < 8; k++) h8_phi[k] *= f;
+      for (k = 0; k < H_DIM; k++) h8_phi[k] *= f;
     }
     t += dt;
     double total_now = compute_rates(r, rates);
     if (drand48() * total_star >= total_now) continue;
     double u = drand48() * total_now;
     double cum = 0;
-    int pick = 7, k;
-    for (k = 0; k < 8; k++) {
+    int pick = n_rate - 1, k;
+    for (k = 0; k < n_rate; k++) {
       cum += rates[k];
       if (u < cum) { pick = k; break; }
+    }
+    if (h8_on) {
+      h8_phi[pick] += 1.0;
+    }
+    if (pick >= 8) {
+      /* Phantom HP firing: updates Hawkes φ only, book unchanged. */
+      continue;
     }
     int side = pick & 1;
     int type = pick >> 1;
     if (hawkes_on) {
       if (side == 0) h_mem_a[type] += 1.0; else h_mem_b[type] += 1.0;
-    }
-    if (h8_on) {
-      h8_phi[pick] += 1.0;
     }
     if (type == 0) {
       apply_tp(r, side,
@@ -839,6 +903,8 @@ int main(int argc, char **argv) {
       replications = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-Z"))
       state_mu_mode = 1;
+    else if (!strcmp(argv[i], "-U"))
+      hybrid_tail_on = 1;
     else {
       fprintf(stderr, "onestep.c: error: unknown arg '%s'\n", argv[i]);
       return 1;
@@ -907,6 +973,10 @@ int main(int argc, char **argv) {
   snprintf(path, sizeof path, "%s/refill.b.own", dir);
   load_kv(path, &refill_b);
   set_refill_diffuse(&refill_b, &refill_b_diffuse);
+  snprintf(path, sizeof path, "%s/refill.a.tail", dir);
+  load_tail_param(path, &tail_a);
+  snprintf(path, sizeof path, "%s/refill.b.tail", dir);
+  load_tail_param(path, &tail_b);
   imb_tables_loaded = 1;
   for (im = 0; im < IMB_BINS; im++) {
     snprintf(path, sizeof path, "%s/tp.a.imb%d.rates", dir, im);
@@ -940,7 +1010,14 @@ int main(int argc, char **argv) {
     if (!read_wire(&r, input_fp))
       return 1;
     int k;
-    for (k = 0; k < nstep; k++) {
+    /* Chained N-step: preserve Hawkes memory ACROSS calls, otherwise each call
+     * resets φ to stationary and clusters can never propagate — sim becomes a
+     * chain of iid μ-driven draws. Reset once up-front via the first call. */
+    simulate_reset_phi = 1;
+    simulate(&r, T);
+    if (!write_wire(&r, stdout)) return 1;
+    simulate_reset_phi = 0;                        /* preserve φ across rest */
+    for (k = 1; k < nstep; k++) {
       simulate(&r, T);
       if (!write_wire(&r, stdout))
         return 1;
