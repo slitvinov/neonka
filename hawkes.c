@@ -21,11 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { D = 10 };  /* 10 event types (tp/tm/dp/dm × ask/bid + hp_a, hp_b).
-                   * HP are observation artifacts of truncation, but INCLUDING
-                   * them in the fit gives better α[visible, visible] values
-                   * because α[visible, HP] absorbs hidden-source excitation
-                   * that would otherwise alias. Sim uses 8×8 subblock only. */
+enum { D = 6 };   /* 6 pooled event types: tp, tm_queue, tm_cascade, dp, dm, hp.
+                   * Input is already pooled (ask+bid merged) and tm split by
+                   * preproc_events.py. */
 
 struct Event { int32_t t, type; };
 
@@ -72,12 +70,12 @@ int main(int argc, char **argv) {
   struct Event tmp;
   while (1) {
     if (fread(&tmp, sizeof tmp, 1, stdin) != 1) break;
-    if (tmp.type >= D) continue;
+    if (tmp.type < 0 || tmp.type >= D) continue;       /* input pre-pooled */
     if (n == cap) { cap *= 2; ev = realloc(ev, cap * sizeof *ev); }
     ev[n++] = tmp;
   }
   if (n == 0) { fprintf(stderr, "hawkes: no events\n"); return 1; }
-  fprintf(stderr, "hawkes: loaded %zu events (10-D incl. HP)\n", n);
+  fprintf(stderr, "hawkes: loaded %zu events (%d-D pooled, tm split)\n", n, D);
 
   int32_t t0 = ev[0].t, t1 = ev[n-1].t + 1;
   double T_total = (double)(t1 - t0);
