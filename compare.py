@@ -96,12 +96,47 @@ class Source:
     def nc0(self):
         return self.ask_nc()[:, 0]
 
+    def nc1(self):
+        return self.ask_nc()[:, 1]
+
     def mid2(self):
         return self.ask_rate()[:, 0] + self.bid_rate()[:, 0]
 
     def returns(self, lag=1):
         m = self.mid2()
         return (m[lag:] - m[:-lag]).astype(np.float64)
+
+    def n_ticks(self):
+        return len(self.rows)
+
+    def events_per_pair(self):
+        """Events/pair = sum |ΔN| across all 16 level-slots per adjacent pair,
+        averaged. This is the event-count analog of classify_pairs.py."""
+        aN = self.ask_nc(); bN = self.bid_nc()
+        aR = self.ask_rate(); bR = self.bid_rate()
+        n = len(self.rows) - 1
+        if n <= 0: return 0.0
+        cnt = 0.0
+        for t in range(n):
+            cnt += _walk_side_count(aR[t], aN[t], aR[t+1], aN[t+1], +1)
+            cnt += _walk_side_count(bR[t], bN[t], bR[t+1], bN[t+1], -1)
+        return cnt / n
+
+
+def _walk_side_count(pR, pN, cR, cN, diff):
+    """Elementary-event count on one side via merge-walk (mirrors rates.c/events.c)."""
+    i = j = n = 0
+    while i < 8 and j < 8 and pN[i] != 0 and cN[j] != 0:
+        d = diff * (int(cR[j]) - int(pR[i]))
+        if d < 0:
+            n += int(cN[j]); j += 1
+        elif d == 0:
+            dn = int(cN[j]) - int(pN[i])
+            if dn: n += abs(dn)
+            i += 1; j += 1
+        else:
+            n += int(pN[i]); i += 1
+    return n
 
 
 
@@ -261,16 +296,48 @@ def run_sections(A, B, sections):
 # Comparators — add new ones here
 # ══════════════════════════════════════════════════════════════════════════════
 
+@section("0. FLAGS  (sim-vs-real headline gaps — surfaces big regressions)")
+def flags(A, B):
+    rows = []
+    evA, evB = A.events_per_pair(), B.events_per_pair()
+    if evA > 0 and abs(evB - evA) / evA > 0.05:
+        rows.append(Row(f"⚠ events/pair off by {100*(evB/evA - 1):+.1f}%",
+                        evA, evB, fmt=".4f", diff="ratio"))
+    spA, spB = A.spread().mean(), B.spread().mean()
+    if spA > 0 and abs(spB - spA) / spA > 0.05:
+        rows.append(Row(f"⚠ spread mean off by {100*(spB/spA - 1):+.1f}%",
+                        spA, spB, fmt=".3f", diff="ratio"))
+    nA, nB = A.nc0().mean(), B.nc0().mean()
+    if nA > 0 and abs(nB - nA) / nA > 0.05:
+        rows.append(Row(f"⚠ nc0 mean off by {100*(nB/nA - 1):+.1f}%",
+                        nA, nB, fmt=".3f", diff="ratio"))
+    n1A, n1B = A.nc1().mean(), B.nc1().mean()
+    if n1A > 0 and abs(n1B - n1A) / n1A > 0.05:
+        rows.append(Row(f"⚠ nc1 mean off by {100*(n1B/n1A - 1):+.1f}%",
+                        n1A, n1B, fmt=".3f", diff="ratio"))
+    retA, retB = A.returns(1).std(), B.returns(1).std()
+    if retA > 0 and abs(retB - retA) / retA > 0.05:
+        rows.append(Row(f"⚠ return std off by {100*(retB/retA - 1):+.1f}%",
+                        retA, retB, fmt=".3f", diff="ratio"))
+    if not rows:
+        rows.append(Row("no gross discrepancies (<5% on ev rate / spread / nc0 / ret std)",
+                        1.0, 1.0, fmt=".1f", diff="none"))
+    return rows
+
+
 @section("1. BASICS")
 def basics(A, B):
     sp_a, sp_b = A.spread(), B.spread()
     return [
-        Row("ticks",         A.n_ticks(),     B.n_ticks(),     fmt=",d", diff="none"),
-        Row("spread mean",   sp_a.mean(),     sp_b.mean()),
-        Row("spread std",    sp_a.std(),      sp_b.std()),
-        Row("spread median", np.median(sp_a), np.median(sp_b), fmt=".1f"),
-        Row("nc0 mean",      A.nc0().mean(),  B.nc0().mean()),
-        Row("nc0 std",       A.nc0().std(),   B.nc0().std()),
+        Row("ticks",            A.n_ticks(),         B.n_ticks(),         fmt=",d", diff="none"),
+        Row("events/pair",      A.events_per_pair(), B.events_per_pair(), fmt=".4f", diff="ratio"),
+        Row("spread mean",      sp_a.mean(),         sp_b.mean()),
+        Row("spread std",       sp_a.std(),          sp_b.std()),
+        Row("spread median",    np.median(sp_a),     np.median(sp_b),     fmt=".1f"),
+        Row("nc0 mean",         A.nc0().mean(),      B.nc0().mean()),
+        Row("nc0 std",          A.nc0().std(),       B.nc0().std()),
+        Row("nc1 mean",         A.nc1().mean(),      B.nc1().mean()),
+        Row("nc1 std",          A.nc1().std(),       B.nc1().std()),
     ]
 
 

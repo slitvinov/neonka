@@ -74,7 +74,7 @@ def apply_dp(aR, bR, aS, bS, aN, bN, side):
         if N[k] == 0: break
         if R[k] == new_R:
             N[k] += 1; S[k] += 1; return
-        past = (new_R < R[k]) if side else (new_R > R[k])
+        past = (new_R > R[k]) if side else (new_R < R[k])
         if past: break
     if k >= NL: return
     for j in range(NL - 1, k, -1):

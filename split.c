@@ -5,6 +5,7 @@
 #include <string.h>
 
 enum { nl = 8, MAXK = nl + 1 };
+enum { MIN_SESSION_LEN = 150000 };
 struct Row {
   int32_t aR[nl], bR[nl], aS[nl], bS[nl], aN[nl], bN[nl], y;
 };
@@ -34,6 +35,7 @@ int main(int argc, char **argv) {
   struct Row cur, prev;
   int64_t i = 0;
   int have_prev = 0;
+  int64_t last_boundary = 0;
   int64_t C[MAXK][MAXK] = {0};
   emit_i64(0);
   while (fread(&cur, sizeof cur, 1, stdin) == 1) {
@@ -42,8 +44,10 @@ int main(int argc, char **argv) {
       int nb = overlap8(prev.bR, cur.bR);
       assert(na < MAXK && nb < MAXK);
       C[na][nb]++;
-      if (na + nb <= 4)
+      if (na + nb <= 4 && i - last_boundary >= MIN_SESSION_LEN) {
         emit_i64(i);
+        last_boundary = i;
+      }
     }
     prev = cur;
     have_prev = 1;

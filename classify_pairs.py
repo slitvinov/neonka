@@ -59,7 +59,7 @@ def report(ev, name):
     u, c = np.unique(ev, return_counts=True)
     for uu, cc in zip(u[:8], c[:8]):
         print(f"  {uu} events: {100*cc/len(ev):5.1f}%  ({cc})")
-    if (ev >= 3).any():
+sysctl -n hw.ncpu    if (ev >= 3).any():
         print(f"  3+ events: {100*(ev >= 3).mean():5.1f}%")
     print(f"  mean events/pair: {ev.mean():.3f}")
 
