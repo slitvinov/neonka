@@ -22,7 +22,7 @@ enum {                   /* pooled event type indices (ask/bid merged) */
   EV_TP, EV_TM_Q, EV_TM_C, EV_DP, EV_DM, EV_HP
 };
 
-#define HK_BETA           0.05     /* fixed Hawkes kernel decay */
+#define HK_BETA           0.05     /* fixed single-exponential kernel decay */
 #define DIFFUSE_THRESHOLD 0.95     /* refill.k=2 mass below this ⇒ sample tail */
 #define TAIL_ALPHA_MAX   -1.05     /* need α < this for finite tail integral */
 #define TAIL_CAP_FACTOR   3        /* truncate power law at k_max = F·k_cutoff */
@@ -231,10 +231,8 @@ static int32_t sample_refill(void) {
 static int load_hawkes(const char *path) {
   FILE *f = fopen(path, "r");
   if (!f) return 0;
-  for (int c = 0; c < N_HAWKES; c++) {
-    hk_mu[c] = 0;
-    for (int j = 0; j < N_HAWKES; j++) hk_alpha[c][j] = 0;
-  }
+  memset(hk_mu, 0, sizeof hk_mu);
+  memset(hk_alpha, 0, sizeof hk_alpha);
   char tag[32]; double v; int c, j;
   while (fscanf(f, "%31s", tag) == 1) {
     if (!strcmp(tag, "beta")) { double b; if (fscanf(f, "%lf", &b) != 1) break; }
@@ -248,7 +246,6 @@ static int load_hawkes(const char *path) {
   }
   fclose(f);
 
-  /* Stationary λ via Gauss elimination of (I − α/β)·λ = μ. */
   double A[N_HAWKES][N_HAWKES + 1];
   for (int c = 0; c < N_HAWKES; c++) {
     for (int j = 0; j < N_HAWKES; j++)
@@ -265,8 +262,8 @@ static int load_hawkes(const char *path) {
       }
     for (int r = 0; r < N_HAWKES; r++)
       if (r != p && A[r][p] != 0.0) {
-        double f = A[r][p] / A[p][p];
-        for (int cc = p; cc < N_HAWKES + 1; cc++) A[r][cc] -= f * A[p][cc];
+        double fac = A[r][p] / A[p][p];
+        for (int cc = p; cc < N_HAWKES + 1; cc++) A[r][cc] -= fac * A[p][cc];
       }
   }
   for (int jj = 0; jj < N_HAWKES; jj++) {
@@ -400,15 +397,15 @@ static double compute_rates(struct Row *r, double rates[N_HAWKES]) {
     } else {
       for (int k = 0; k < N_HAWKES; k++) mu[k] = hk_mu[k];
     }
-    for (int k = 0; k < N_HAWKES; k++) {
-      double rc = mu[k];
-      for (int j = 0; j < N_HAWKES; j++) rc += hk_alpha[k][j] * hk_phi[j];
-      rates[k] = rc > 0 ? rc : 0;
+    for (int c = 0; c < N_HAWKES; c++) {
+      double rc = mu[c];
+      for (int j = 0; j < N_HAWKES; j++) rc += hk_alpha[c][j] * hk_phi[j];
+      rates[c] = rc > 0 ? rc : 0;
     }
     /* State-gate tm_q / tm_c to available book configurations. */
     if (!tm_q_available(r)) rates[EV_TM_Q] = 0;
     if (!tm_c_available(r)) rates[EV_TM_C] = 0;
-    for (int k = 0; k < N_HAWKES; k++) total += rates[k];
+    for (int c = 0; c < N_HAWKES; c++) total += rates[c];
     return total;
   }
   /* Fallback: pooled imb rates, no Hawkes excitation. */

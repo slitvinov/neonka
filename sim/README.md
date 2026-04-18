@@ -34,6 +34,11 @@ sh sim/run.sh
 | 08_smoking_gun_cumcount.png | **Cumulative tp_a/tp_b/tm_a/tm_b curves track tightly.** |
 | 09_smoking_gun_diff.png | Bid↔ask cumulative DIFFERENCE — bounded, mean-reverting. |
 | 10_cum_gap_summary.png | max and end-of-session a−b gap across all 62 sessions. |
+| 11–17 (params)         | Fitted Hawkes params per session (β, μ, ρ, λ_stat, α heatmap). |
+| 18_refill_tail_fits.png | Pooled refill tail fits (power-law vs exp vs log-normal). |
+| 19_kernel_acf.png      | **Kernel-form test:** event-rate ACF log-linear + log-log. |
+| 20_kernel_per_session.png | Kernel form across 4 representative sessions (power-law wins). |
+| 21_kernel_residual.png | Residual: empirical ACF / (our sim's β=0.05 kernel) — **exponential off by 10×+ at τ=100**. |
 
 ## Verdict
 

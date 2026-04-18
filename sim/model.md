@@ -5,8 +5,23 @@ forward vs time-reverse / rev+side-flip probes).
 
 ## One-line summary
 
-**Bid/ask-symmetric 8-D mutually-exciting Hawkes process driving a full
-limit-order-book with queue-reactive dynamics. We see only the top 8 levels.**
+**Bid/ask-symmetric mutually-exciting Hawkes process with a power-law kernel,
+driving a full limit-order-book with queue-reactive dynamics. We see only the
+top 8 levels.**
+
+## Kernel form: POWER-LAW, not exponential (Bacry-Jaisson 2016)
+
+Empirical event-rate ACF on ses45 (see `sim/figs/19_kernel_acf.png`):
+
+| Model | Form | R² |
+|---|---|---|
+| Single exponential (fitted β) | `0.05·exp(−0.00039·τ)` | **0.62** |
+| Power-law (fitted γ)          | `0.15·τ^(-0.274)`      | **0.97** |
+| Two-exponential mixture       | fast β=0.14 + slow β=0.0005 | 0.75 |
+
+**Our sim's assumed β=0.05 exponential is off by 10× or more at τ≥100 rows**
+(see `sim/figs/21_kernel_residual.png`). Real LOB kernels have long-memory
+power-law decay; the generator almost certainly uses such a kernel.
 
 ## Important caveat: HP is an observation artifact, not a generator event
 
