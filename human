@@ -1,0 +1,22 @@
+#!/usr/bin/awk -f
+BEGIN {
+  if (ENVIRON["NOHEADER"] == "") {
+    printf "%8s %6s %6s %6s %6s %6s %6s\n",
+           "ntics", "n%", "t+%", "t-%", "d+%", "d-%", "r%"
+  }
+}
+{
+  ntics = $1
+  if (ntics == 0)
+    next
+  n     = $2
+  tp    = $3 + $8
+  tm    = $4 + $9
+  dp    = $5 + $10
+  dm    = $6 + $11
+  r     = $7 + $12
+  printf "%8d %6.1f %6.1f %6.1f %6.1f %6.1f %6.1f\n",
+         ntics,
+         100*n/ntics, 100*tp/ntics, 100*tm/ntics,
+         100*dp/ntics, 100*dm/ntics, 100*r/ntics
+}
