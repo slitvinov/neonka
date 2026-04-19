@@ -64,8 +64,28 @@ static double qr_dp_a[QR_SP_MAX][N0_MAX], qr_dp_b[QR_SP_MAX][N0_MAX];
 static double qr_dm_a[QR_SP_MAX][N0_MAX], qr_dm_b[QR_SP_MAX][N0_MAX];
 static int qr_loaded = 0;
 
-static int qr_hk_loaded = 0;  /* Hawkes loaded on top of QR (Wu2019 hybrid) */
-static int hk_additive = 0;   /* μ=0 everywhere → additive residual: rate += Σα·φ */
+static int qr_hk_loaded = 0;  /* Hawkes loaded on top of QR */
+/* Side memory: exponentially-decayed counts of recent ask/bid-side events.
+ * Used only to bias side selection in sample_side; does NOT enter rates. */
+static double phi_a_side = 0, phi_b_side = 0;
+static double alpha_side = 0.15;   /* bias strength; tuned empirically */
+/* Flat mode: ignore state — use marginal per-type rates + 50/50 side. */
+static int flat_mode = 0;
+static double flat_rates[N_HAWKES] = {0};
+/* Hidden book per side: decaying histogram of recent dp distances.
+ * Replaces the memoryless refill pool — when cascade_refill fires, it
+ * draws from the side's own accumulated dp history, reflecting that
+ * "refills" are really past dp orders surfacing from the invisible tail. */
+enum { NB_HIDDEN = 64 };            /* bin k = distance k*TICK from top */
+static double hidden_a[NB_HIDDEN] = {0}, hidden_b[NB_HIDDEN] = {0};
+static const double BETA_BOOK = 0.01;   /* book-memory decay (half-life ~70 ticks) */
+static int hidden_mode = 0;         /* -H flag: use hidden-book refill */
+static void hidden_add(int side, int32_t dist);
+static int32_t hidden_sample(int side);
+/* Warm-up state: accumulated from real dp events via read_wire. */
+static double real_hidden_a[NB_HIDDEN] = {0}, real_hidden_b[NB_HIDDEN] = {0};
+static int32_t real_hidden_last_t = 0;
+static int real_hidden_init = 0;
 
 /* QR2: adds opposite-queue bucket to tp/tm rates (HLR's 3-D conditioning).
  * Captures directional asymmetry QR misses (§14 drift at moderate imb). */
@@ -143,6 +163,26 @@ static void real_phi_add_event(int32_t t_ev, int c) {
   real_phi[c] += 1.0;
 }
 
+static void real_hidden_decay_to(int32_t t) {
+  int32_t dt = t - real_hidden_last_t;
+  if (dt <= 0) return;
+  double dec = exp(-BETA_BOOK * dt);
+  for (int i = 0; i < NB_HIDDEN; i++) {
+    real_hidden_a[i] *= dec;
+    real_hidden_b[i] *= dec;
+  }
+  real_hidden_last_t = t;
+}
+
+static void real_hidden_add(int32_t t, int side, int32_t dist) {
+  if (!real_hidden_init) { real_hidden_last_t = t; real_hidden_init = 1; }
+  real_hidden_decay_to(t);
+  int bin = (int)(dist / TICK);
+  if (bin < 0 || bin >= NB_HIDDEN) return;
+  if (side == 0) real_hidden_a[bin] += 1.0;
+  else           real_hidden_b[bin] += 1.0;
+}
+
 static int imb_bin(int32_t aN0, int32_t bN0, int32_t aN1, int32_t bN1) {
   int64_t s = (int64_t)aN0 + bN0, d = (int64_t)aN0 - bN0;
   int b0 = (s == 0) ? 1 : (d * 5 < -s) ? 0 : (d * 5 > s) ? 2 : 1;
@@ -153,6 +193,9 @@ static int imb_bin(int32_t aN0, int32_t bN0, int32_t aN1, int32_t bN1) {
 
 static int read_wire(struct Row *r, FILE *f) {
   int32_t w[REC_COLS];
+  /* Previous book state (cols 5..52) for computing dp-event distance. */
+  static int32_t prev_book[REC_COLS - 5] = {0};
+  static int prev_valid = 0;
   if (is_events_fmt) {
     const off_t recsz = (off_t)sizeof w;
     while (1) {
@@ -160,14 +203,30 @@ static int read_wire(struct Row *r, FILE *f) {
       if (fread(w, recsz, 1, f) != 1) return 0;
       if (bytes_remaining >= 0) bytes_remaining -= recsz;
       if (w[0] == EV_IDLE) break;
-      /* Accumulate real event → real_phi for warm-start at next seed.
-       * Only QR-without-Hawkes skips this (pure memoryless). */
-      if (!qr_loaded || qr_hk_loaded) {
+      /* Accumulate real event → real_phi for warm-start at next seed. */
+      if (!qr_loaded || qr_hk_loaded || flat_mode) {
         int c = pooled_event_type(w[0], w[5 + 32], w[5 + 40]);
         if (c >= 0) real_phi_add_event(w[1], c);
       }
+      /* dp event → bump real_hidden at that dp's distance from top. */
+      if (hidden_mode && prev_valid && (w[0] == 4 || w[0] == 5)) {
+        int side = (w[0] == 5) ? 1 : 0;
+        int32_t *cR = &w[5 + (side ? NL : 0)];  /* cur R[] this side */
+        int32_t *cN = &w[5 + 4*NL + (side ? NL : 0)];
+        int32_t *pN = &prev_book[4*NL + (side ? NL : 0)];
+        for (int k = 1; k < NL; k++) {
+          if (cN[k] > pN[k] || (cN[k] > 0 && pN[k] == 0)) {
+            int32_t dist = side ? (cR[0] - cR[k]) : (cR[k] - cR[0]);
+            if (dist > 0) real_hidden_add(w[1], side, dist);
+            break;
+          }
+        }
+      }
+      memcpy(prev_book, &w[5], sizeof prev_book);
+      prev_valid = 1;
     }
-    if ((!qr_loaded || qr_hk_loaded) && real_phi_init) real_phi_decay_to(w[1]);
+    if ((!qr_loaded || qr_hk_loaded || flat_mode) && real_phi_init) real_phi_decay_to(w[1]);
+    if (hidden_mode && real_hidden_init) real_hidden_decay_to(w[1]);
     memset(r, 0, sizeof *r);
     memcpy(r->aR, &w[5 + 0 * NL], NL * 4);
     memcpy(r->bR, &w[5 + 1 * NL], NL * 4);
@@ -347,44 +406,13 @@ static int load_hawkes(const char *path) {
   }
   fclose(f);
 
-  /* Detect additive mode: if μ≡0 the params file encodes a residual-fit
-   * Hawkes for Wu-Rambaldi additive form (rate = λ_QR + Σα·φ).  No λ_stat
-   * solve, no φ_stat warm-up — φ starts at zero and tracks events. */
-  double mu_sum = 0;
-  for (int c = 0; c < N_HAWKES; c++) mu_sum += hk_mu[c];
-  hk_additive = (mu_sum == 0.0);
-  if (hk_additive) {
-    for (int jj = 0; jj < N_HAWKES; jj++) {
-      hk_lambda_stat[jj] = 0.0;
-      hk_phi_stat[jj] = 0.0;
-      hk_phi[jj] = 0.0;
-    }
-    return 1;
-  }
-
-  /* Multiplicative form (μ>0): stationary λ solves (I − α/β)·λ = μ. */
-  for (int c = 0; c < N_HAWKES; c++) {
-    double lam = hk_mu[c];
-    for (int j = 0; j < N_HAWKES; j++)
-      lam += hk_alpha[c][j] * hk_mu[j] / hk_beta;   /* first-order approx */
-    hk_lambda_stat[c] = lam;
-    hk_phi_stat[c] = lam / hk_beta;
-    hk_phi[c] = hk_phi_stat[c];
-  }
-  /* Fixed-point polish for the (I − α/β)·λ = μ system, 10 iters suffices. */
-  for (int it = 0; it < 10; it++) {
-    double next[N_HAWKES];
-    for (int c = 0; c < N_HAWKES; c++) {
-      double s = hk_mu[c];
-      for (int j = 0; j < N_HAWKES; j++)
-        s += hk_alpha[c][j] * hk_lambda_stat[j] / hk_beta;
-      next[c] = s;
-    }
-    for (int c = 0; c < N_HAWKES; c++) {
-      hk_lambda_stat[c] = next[c];
-      hk_phi_stat[c] = next[c] / hk_beta;
-      hk_phi[c] = hk_phi_stat[c];
-    }
+  /* Memory is side-based only (phi_a_side / phi_b_side) and tracked in
+   * sample_side.  The per-type hk_phi/hk_mu/hk_alpha arrays are no longer
+   * used for rates — they stay zero. */
+  for (int jj = 0; jj < N_HAWKES; jj++) {
+    hk_lambda_stat[jj] = 0.0;
+    hk_phi_stat[jj] = 0.0;
+    hk_phi[jj] = 0.0;
   }
   return 1;
 }
@@ -408,7 +436,7 @@ static void shift_up_from(struct Side s, int from) {
 static void cascade_refill(struct Row *r, int side) {
   struct Side s = side_view(r, side);
   if (s.N[NL - 2] > 0) {
-    int32_t dist = sample_refill();
+    int32_t dist = hidden_mode ? hidden_sample(side) : sample_refill();
     s.R[NL - 1] = side ? s.R[NL - 2] - dist : s.R[NL - 2] + dist;
     s.N[NL - 1] = 1; s.S[NL - 1] = 1; s.F[NL - 1] = 1;
   } else {
@@ -434,6 +462,9 @@ static void apply_tp(struct Row *r, int side, int32_t dist) {
 static void apply_dp(struct Row *r, int side, int32_t dist) {
   struct Side s = side_view(r, side);
   if (dist <= 0) return;
+  /* Record every dp distance into the hidden-book histogram (representing
+   * a deeper order now existing on this side — visible or not). */
+  if (hidden_mode) hidden_add(side, dist);
   int32_t newR = side ? s.R[0] - dist : s.R[0] + dist;
   int k;
   for (k = 1; k < NL; k++) {
@@ -504,6 +535,19 @@ static double qr2_lookup(double grid[QR_SP_MAX][N0_MAX][OPP_MAX],
  * The opp_bucket conditioning fixes HLR's cross-queue asymmetry that pure
  * QR missed at moderate-imb states (§14 drift). */
 static double compute_rates_qr(struct Row *r, double rates[N_HAWKES]) {
+  if (flat_mode) {
+    /* Memory-only rates: λ_c(t) = μ_c + Σ_j α_{c,j} φ_j(t).  No state.
+     * μ = per-type marginal baseline (flat_rates); α·φ adds burst boost. */
+    double total = 0;
+    for (int c = 0; c < N_HAWKES; c++) {
+      double lam = flat_rates[c];
+      for (int j = 0; j < N_HAWKES; j++) lam += hk_alpha[c][j] * hk_phi[j];
+      if (lam < 0) lam = 0;
+      rates[c] = lam;
+      total += lam;
+    }
+    return total;
+  }
   int32_t sp = r->aR[0] - r->bR[0];
   int an = r->aN[0], bn = r->bN[0];
   int opp_a = opp_bucket_of(bn);   /* opp of ask = bid's n0 */
@@ -538,25 +582,8 @@ static double compute_rates_qr(struct Row *r, double rates[N_HAWKES]) {
    * At stationarity φ=E[φ] → multiplier=1, rate=λ_QR (state-only).
    * During a burst → multiplier>1 → more events.  Captures temporal
    * self-excitation on top of memoryless state-conditional rates. */
-  if (qr_hk_loaded) {
-    if (hk_additive) {
-      /* Wu-Rambaldi additive residual: rate += Σ_j α_{c,j} φ_j. */
-      for (int c = 0; c < N_HAWKES; c++) {
-        double add = 0;
-        for (int j = 0; j < N_HAWKES; j++) add += hk_alpha[c][j] * hk_phi[j];
-        rates[c] += add;
-        if (rates[c] < 0) rates[c] = 0;
-      }
-    } else {
-      for (int c = 0; c < N_HAWKES; c++) {
-        double lam_curr = hk_mu[c];
-        for (int j = 0; j < N_HAWKES; j++) lam_curr += hk_alpha[c][j] * hk_phi[j];
-        double m = (hk_lambda_stat[c] > 0) ? lam_curr / hk_lambda_stat[c] : 1.0;
-        if (m < 0) m = 0;
-        rates[c] *= m;
-      }
-    }
-  }
+  /* Rates are pure λ_QR(sp, n_own).  Memory (Hawkes φ) does NOT modify
+   * rate magnitudes — it only biases event-side selection in sample_side. */
 
   double total = 0;
   for (int c = 0; c < N_HAWKES; c++) total += rates[c];
@@ -605,6 +632,9 @@ static int sample_side(int type, struct Row *r) {
   if (allow_a && !allow_b) return 0;
   if (!allow_a && allow_b) return 1;
   if (!allow_a && !allow_b) return 0;
+  if (flat_mode) { int s = drand48() < 0.5 ? 0 : 1;
+                   if (s) phi_b_side += 1; else phi_a_side += 1;
+                   return s; }
   int32_t sp = r->aR[0] - r->bR[0];
   double ra, rb;
   if (qr_loaded) {
@@ -647,8 +677,21 @@ static int sample_side(int type, struct Row *r) {
     }
     ra = lookup(a, sp); rb = lookup(b, sp);
   }
-  if (ra + rb <= 0) return drand48() < 0.5 ? 0 : 1;
-  return drand48() * (ra + rb) < ra ? 0 : 1;
+  if (ra + rb <= 0) { int s = drand48() < 0.5 ? 0 : 1;
+                      if (s) phi_b_side += 1; else phi_a_side += 1;
+                      return s; }
+  /* Side-memory bias: recent activity on a side boosts that side's weight.
+   * Centered deviation keeps the weighting well-behaved away from φ_a=φ_b. */
+  double phi_mean = 0.5 * (phi_a_side + phi_b_side);
+  double wa = ra * (1.0 + alpha_side * (phi_a_side - phi_mean));
+  double wb = rb * (1.0 + alpha_side * (phi_b_side - phi_mean));
+  if (wa < 0) wa = 0; if (wb < 0) wb = 0;
+  if (wa + wb <= 0) { int s = drand48() < 0.5 ? 0 : 1;
+                      if (s) phi_b_side += 1; else phi_a_side += 1;
+                      return s; }
+  int side = drand48() * (wa + wb) < wa ? 0 : 1;
+  if (side) phi_b_side += 1; else phi_a_side += 1;
+  return side;
 }
 
 /* ── Ogata-thinned simulation loop ────────────────────────────────────────── */
@@ -675,10 +718,42 @@ static void fire_event(struct Row *r, int type, int side, int32_t sp) {
   }
 }
 
-/* Exponential decay of all φ_j by dt with single β. */
+/* Exponential decay of all φ_j by dt with single β.  Also decays side memory
+ * and the hidden-book histograms (slower decay β_book). */
 static void decay_phi(double dt) {
   double dec = exp(-hk_beta * dt);
   for (int j = 0; j < N_HAWKES; j++) hk_phi[j] *= dec;
+  phi_a_side *= dec;
+  phi_b_side *= dec;
+  if (hidden_mode) {
+    double dec_book = exp(-BETA_BOOK * dt);
+    for (int i = 0; i < NB_HIDDEN; i++) {
+      hidden_a[i] *= dec_book;
+      hidden_b[i] *= dec_book;
+    }
+  }
+}
+
+static void hidden_add(int side, int32_t dist) {
+  int bin = (int)(dist / TICK);
+  if (bin < 0 || bin >= NB_HIDDEN) return;
+  if (side == 0) hidden_a[bin] += 1.0;
+  else           hidden_b[bin] += 1.0;
+}
+
+/* Sample a distance from side's hidden histogram; decrement that bin. */
+static int32_t hidden_sample(int side) {
+  double *h = (side == 0) ? hidden_a : hidden_b;
+  double total = 0;
+  for (int i = 0; i < NB_HIDDEN; i++) total += h[i];
+  if (total <= 0) return TICK;     /* empty → default step */
+  double u = drand48() * total, cum = 0;
+  for (int i = 0; i < NB_HIDDEN; i++) {
+    cum += h[i];
+    if (u < cum) { h[i] = (h[i] > 0) ? h[i] - 1.0 : 0.0;
+                   return (int32_t)((i + 1) * TICK); }  /* +1 so min dist = TICK */
+  }
+  return TICK;
 }
 
 /* Pick event type by inverse CDF on rates[0..n). */
@@ -696,23 +771,35 @@ static int sample_event(const double *rates, int n, double total) {
 static void simulate(struct Row *r, double T) {
   double t = 0, rates[N_HAWKES];
   r->y = 0;
-  if (reset_phi && (!qr_loaded || qr_hk_loaded))
+  if (reset_phi && ((!qr_loaded) || qr_hk_loaded || flat_mode))
     memcpy(hk_phi, real_phi_init ? real_phi : hk_phi_stat, sizeof hk_phi);
+  if (reset_phi) {
+    phi_a_side = 0; phi_b_side = 0;
+    if (hidden_mode) {
+      if (real_hidden_init) {
+        memcpy(hidden_a, real_hidden_a, sizeof hidden_a);
+        memcpy(hidden_b, real_hidden_b, sizeof hidden_b);
+      } else {
+        for (int i = 0; i < NB_HIDDEN; i++) { hidden_a[i] = 0; hidden_b[i] = 0; }
+      }
+    }
+  }
 
+  int track_phi = (!qr_loaded) || qr_hk_loaded || flat_mode;
   while (t < T && !bad_state(r)) {
     double lam_star = qr_loaded ? compute_rates_qr(r, rates)
                                 : compute_rates(r, rates);
     if (lam_star <= 0) break;
     double dt = -log(drand48()) / lam_star;
     if (t + dt > T) break;
-    if (!qr_loaded || qr_hk_loaded) decay_phi(dt);
+    if (track_phi) decay_phi(dt);
     t += dt;
 
     double lam_now = qr_loaded ? compute_rates_qr(r, rates)
                                : compute_rates(r, rates);
     if (drand48() * lam_star >= lam_now) continue;     /* Ogata reject */
     int pick = sample_event(rates, N_HAWKES, lam_now);
-    if (!qr_loaded || qr_hk_loaded) hk_phi[pick] += 1.0;
+    if (track_phi) hk_phi[pick] += 1.0;
     if (pick == EV_HP) continue;                       /* HP phantom: φ only */
     fire_event(r, pick, sample_side(pick, r), r->aR[0] - r->bR[0]);
   }
@@ -1014,6 +1101,21 @@ int main(int argc, char **argv) {
         return 1;
       }
       qr_hk_loaded = 1;
+    }
+    else if (!strcmp(argv[i], "-H")) {
+      /* Hidden-book refill: sample cascade_refill distance from per-side
+       * histogram of recent dp distances instead of global empirical pool. */
+      hidden_mode = 1;
+    }
+    else if (!strcmp(argv[i], "-F")) {
+      /* Flat mode: ignore state dependence.  Rates hard-coded for ses0. */
+      flat_mode = 1;
+      flat_rates[EV_TP]   = 0.25316;
+      flat_rates[EV_TM_Q] = 0.16267;
+      flat_rates[EV_TM_C] = 0.08754;
+      flat_rates[EV_DP]   = 0.20091;
+      flat_rates[EV_DM]   = 0.19673;
+      flat_rates[EV_HP]   = 0;
     }
     else if (!strcmp(argv[i], "-D") && i + 1 < argc) events_path = argv[++i];
     else if (!strcmp(argv[i], "-s") && i + 1 < argc) session_id = atol(argv[++i]);
