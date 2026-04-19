@@ -11,7 +11,7 @@ T = int(sys.argv[2])
 use_mirror = '--mirror' in sys.argv
 ykey = f'y{T}'
 
-FEAT = '/tmp/mlfeat'
+FEAT = '/tmp/neonka/mlfeat'
 p = f'{FEAT}/s{s}.npz'
 if not os.path.exists(p):
     print(f"{s} {T} 0.0000"); sys.exit(0)

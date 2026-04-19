@@ -8,7 +8,7 @@ shift
 FLAGS="$@"
 NP=${NP:-10}
 
-if [ ! -f /tmp/mlfeat/s0.npz ]; then
+if [ ! -f /tmp/neonka/mlfeat/s0.npz ]; then
   python3 ml_feat.py
 fi
 
@@ -23,7 +23,7 @@ export BLIS_NUM_THREADS=1
 TAG=$(echo "$FLAGS" | tr -d ' -' | tr 'a-z' 'A-Z')
 [ -n "$TAG" ] && TAG="_$TAG"
 echo "T=$T  parallel=$NP  flags=$FLAGS  (OMP=1 per fold)"
-OUT=/tmp/mlloso_T${T}${TAG}.txt
+OUT=/tmp/neonka/mlloso_T${T}${TAG}.txt
 seq 0 61 | xargs -P $NP -I{} python3 ml_fold.py {} $T $FLAGS > $OUT
 python3 -c "
 import numpy as np

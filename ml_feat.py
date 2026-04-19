@@ -21,7 +21,7 @@ REGIME_SPLIT = 52
 SIGN_TOP_CNT = np.array([-1, +1, +1, -1, 0, 0, 0, 0])
 SIGN_DEEP_CNT = np.array([0, 0, 0, 0, -1, +1, +1, -1])
 
-OUTDIR = '/tmp/mlfeat'
+OUTDIR = '/tmp/neonka/mlfeat'
 os.makedirs(OUTDIR, exist_ok=True)
 
 def cks_row_ofi(aR0, aS0, bR0, bS0):
@@ -134,49 +134,57 @@ def load_session(s, offs, ev_mm):
     n_sym_base = 13
     n_anti_base = 12
 
-    # Hawkes memory φ per POOLED event type (6-D: tp, tm_q, tm_c, dp, dm, hp).
-    # φ_c(t) = Σ_{past events of pooled type c} exp(-β(t - t_event))
-    # Params loaded from 6-D tm-split fit (preproc_events.py pooling).
-    pp = f'/tmp/hawkes{s}.params'
-    H_BETA = 0.05
-    D = 6
-    h_mu = np.zeros(D); h_alpha = np.zeros((D, D))
+    # Hawkes memory φ per POOLED event type (6-D: tp, tm_q, tm_c, dp, dm, hp)
+    # with 3-exponential mixture kernel:
+    #   φ_{c,k}(t) = Σ_{past events of c} exp(−β_k (t − t_event)),  k ∈ {0,1,2}
+    # intensity: λ_c(t) = μ_c + Σ_{j,k} α_{c,j,k} φ_{j,k}(t)
+    pp = f'/tmp/neonka/hawkes/{s}.params'
+    D, K = 6, 3
+    h_beta = np.array([0.5, 0.05, 0.005])   # defaults
+    h_mu = np.zeros(D); h_alpha = np.zeros((D, D, K))
     if os.path.exists(pp):
         with open(pp) as f:
             for ln in f:
                 parts = ln.split()
                 if not parts: continue
-                if parts[0] == 'beta':
-                    H_BETA = float(parts[1])
-                elif parts[0] == 'mu':
+                if parts[0] == 'beta' and len(parts) >= 3:
+                    kk = int(parts[1])
+                    if 0 <= kk < K: h_beta[kk] = float(parts[2])
+                elif parts[0] == 'mu' and len(parts) >= 3:
                     c = int(parts[1])
                     if c < D: h_mu[c] = float(parts[2])
-                elif parts[0] == 'alpha':
-                    c = int(parts[1]); j = int(parts[2])
-                    if c < D and j < D: h_alpha[c, j] = float(parts[3])
+                elif parts[0] == 'alpha' and len(parts) >= 5:
+                    c = int(parts[1]); j = int(parts[2]); kk = int(parts[3])
+                    if c < D and j < D and 0 <= kk < K:
+                        h_alpha[c, j, kk] = float(parts[4])
 
-    phi_per_seed = np.zeros((len(seeds), D), dtype=np.float64)
-    phi = np.zeros(D, dtype=np.float64)
+    # phi has shape (D, K): one memory state per event-type per kernel decay.
+    phi_per_seed = np.zeros((len(seeds), D, K), dtype=np.float64)
+    phi = np.zeros((D, K), dtype=np.float64)
     ev_i = 0
     prev_t = 0
-    for k, srow in enumerate(seed_row):
+    for k_seed, srow in enumerate(seed_row):
         while ev_i < len(ev_t) and ev_t[ev_i] <= srow:
             t_ev = ev_t[ev_i]
             dt = t_ev - prev_t
-            if dt > 0: phi *= np.exp(-H_BETA * dt)
+            if dt > 0:
+                for kk in range(K): phi[:, kk] *= np.exp(-h_beta[kk] * dt)
             c = ev_pt[ev_i]
-            if 0 <= c < D: phi[c] += 1.0
+            if 0 <= c < D: phi[c, :] += 1.0
             prev_t = t_ev
             ev_i += 1
         dt = srow - prev_t
-        phi_per_seed[k] = phi * np.exp(-H_BETA * dt) if dt > 0 else phi.copy()
+        if dt > 0:
+            for kk in range(K): phi_per_seed[k_seed, :, kk] = phi[:, kk] * np.exp(-h_beta[kk] * dt)
+        else:
+            phi_per_seed[k_seed] = phi.copy()
 
-    # φ features are pooled (no ask/bid pair). All 6 values directly.
-    # Type order: [tp, tm_q, tm_c, dp, dm, hp]
-    phi_feats = [phi_per_seed[:, i:i+1] for i in range(D)]
+    # Feature set: total φ per event type (sum over K), plus per-k components.
+    phi_total = phi_per_seed.sum(axis=2)            # (n_seeds, D) — short+mid+long
+    phi_feats = [phi_total[:, i:i+1] for i in range(D)]
 
-    # α·φ rate features: sim's instantaneous Hawkes intensity per pooled type.
-    rates = phi_per_seed @ h_alpha.T + h_mu[None, :]        # (n_seeds, D)
+    # α·φ rate: λ_c = μ_c + Σ_{j,k} α_{c,j,k} φ_{j,k}
+    rates = np.einsum('cjk,njk->nc', h_alpha, phi_per_seed) + h_mu[None, :]
     rate_feats = [rates[:, i:i+1] for i in range(D)]
 
     # Micro-products (sim-state derivable — functions of current book)

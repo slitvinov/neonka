@@ -445,10 +445,10 @@ static double compute_rates(struct Row *r, double rates[N_HAWKES]) {
     } else {
       for (int k = 0; k < N_HAWKES; k++) mu[k] = hk_mu[k];
     }
-    /* state_mode uses pool_rate as the state-conditional baseline (which already
-     * includes Hawkes clustering at that state). Add only the transient
-     * Hawkes deviation α·(φ − E[φ]) so stationary sim rate ≈ pool_rate.
-     * Non-state mode uses pure Hawkes: μ + α·φ. */
+    /* state_mode uses pool_rate as the state-conditional baseline (which
+     * already includes Hawkes clustering at that state). Add only the
+     * transient Hawkes deviation α·(φ − E[φ]) so stationary sim rate ≈
+     * pool_rate.  Non-state mode uses pure Hawkes: μ + α·φ. */
     for (int c = 0; c < N_HAWKES; c++) {
       double rc = mu[c];
       for (int j = 0; j < N_HAWKES; j++)
@@ -500,7 +500,8 @@ static int sample_side(int type, struct Row *r) {
   struct KV *a, *b;
   switch (type) {
     case EV_TP:                                 a = &tp_a[im]; b = &tp_b[im]; break;
-    case EV_TM_Q: case EV_TM_C:                 a = &tm_a[im]; b = &tm_b[im]; break;
+    case EV_TM_Q:                               a = &tm_q_a[im]; b = &tm_q_b[im]; break;
+    case EV_TM_C:                               a = &tm_c_a[im]; b = &tm_c_b[im]; break;
     case EV_DP:                                 a = &dp_a[im]; b = &dp_b[im]; break;
     case EV_DM:                                 a = &dm_a[im]; b = &dm_b[im]; break;
     default:    return drand48() < 0.5 ? 0 : 1;
@@ -571,30 +572,49 @@ static void simulate(struct Row *r, double T) {
 
 /* ── table loading orchestrator ───────────────────────────────────────────── */
 
-static void load_tables(const char *dir) {
+/* Try `global_dir/name` first (if given), else fall back to `local_dir/name`.
+ * Lets rate tables stay per-session while jumps/refill come from a shared
+ * pool across sessions (pool_jumps.py merges them into tables_common). */
+static int load_kv_fallback(const char *gdir, const char *ldir,
+                            const char *name, struct KV *t) {
+  char path[512];
+  if (gdir) {
+    snprintf(path, sizeof path, "%s/%s", gdir, name);
+    if (load_kv(path, t)) return 1;
+  }
+  snprintf(path, sizeof path, "%s/%s", ldir, name);
+  return load_kv(path, t);
+}
+
+static void load_tables(const char *dir, const char *gdir) {
   char path[512];
   imb_loaded = 1;
   for (int im = 0; im < IMB_BINS; im++) {
     snprintf(path, sizeof path, "%s/tp.a.imb%d.rates", dir, im); if (!load_kv(path, &tp_a[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/tp.b.imb%d.rates", dir, im); if (!load_kv(path, &tp_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm.a.imb%d.rates", dir, im); if (!load_kv(path, &tm_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm.b.imb%d.rates", dir, im); if (!load_kv(path, &tm_b[im])) imb_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm_q.a.imb%d.rates", dir, im); if (!load_kv(path, &tm_q_a[im])) imb_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm_q.b.imb%d.rates", dir, im); if (!load_kv(path, &tm_q_b[im])) imb_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm_c.a.imb%d.rates", dir, im); if (!load_kv(path, &tm_c_a[im])) imb_loaded = 0;
+    snprintf(path, sizeof path, "%s/tm_c.b.imb%d.rates", dir, im); if (!load_kv(path, &tm_c_b[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/dp.a.imb%d.rates", dir, im); if (!load_kv(path, &dp_a[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/dp.b.imb%d.rates", dir, im); if (!load_kv(path, &dp_b[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/dm.a.imb%d.rates", dir, im); if (!load_kv(path, &dm_a[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/dm.b.imb%d.rates", dir, im); if (!load_kv(path, &dm_b[im])) imb_loaded = 0;
     snprintf(path, sizeof path, "%s/n.imb%d.rates",    dir, im); load_kv(path, &n_imb[im]);
   }
-  snprintf(path, sizeof path, "%s/tp.own", dir); load_kv(path, &tp_own);
-  snprintf(path, sizeof path, "%s/dp.own", dir); load_kv(path, &dp_own);
+  load_kv_fallback(gdir, dir, "tp.own", &tp_own);
+  load_kv_fallback(gdir, dir, "dp.own", &dp_own);
   for (int sp = 0; sp < SP_MAX; sp++) {
-    snprintf(path, sizeof path, "%s/tp.own.sp%d", dir, sp); load_kv(path, &tp_own_sp[sp]);
-    snprintf(path, sizeof path, "%s/dp.own.sp%d", dir, sp); load_kv(path, &dp_own_sp[sp]);
+    char name[64];
+    snprintf(name, sizeof name, "tp.own.sp%d", sp);
+    load_kv_fallback(gdir, dir, name, &tp_own_sp[sp]);
+    snprintf(name, sizeof name, "dp.own.sp%d", sp);
+    load_kv_fallback(gdir, dir, name, &dp_own_sp[sp]);
   }
   /* Pool refill histograms (ask + bid) into a single distribution. */
   struct KV ra, rb;
-  snprintf(path, sizeof path, "%s/refill.a.own", dir); load_kv(path, &ra);
-  snprintf(path, sizeof path, "%s/refill.b.own", dir); load_kv(path, &rb);
+  load_kv_fallback(gdir, dir, "refill.a.own", &ra);
+  load_kv_fallback(gdir, dir, "refill.b.own", &rb);
   refill.n = 0;
   for (int i = 0; i < ra.n; i++) {
     refill.k[refill.n] = ra.k[i]; refill.v[refill.n] = ra.v[i]; refill.n++;
@@ -674,12 +694,14 @@ static int run_seed_reps(double T, int stride, int replications) {
 
 int main(int argc, char **argv) {
   const char *dir = "tables";
+  const char *gdir = NULL;   /* -g <common_dir>: pooled jump/refill tables */
   double T = 1.0;
   long seed = time(NULL);
   int nstep = 0, stride = 1, replications = 1;
 
   for (int i = 1; i < argc; i++) {
     if      (!strcmp(argv[i], "-m") && i + 1 < argc) dir = argv[++i];
+    else if (!strcmp(argv[i], "-g") && i + 1 < argc) gdir = argv[++i];
     else if (!strcmp(argv[i], "-T") && i + 1 < argc) T = atof(argv[++i]);
     else if (!strcmp(argv[i], "-R") && i + 1 < argc) seed = atol(argv[++i]);
     else if (!strcmp(argv[i], "-N") && i + 1 < argc) nstep = atoi(argv[++i]);
@@ -703,7 +725,7 @@ int main(int argc, char **argv) {
   if (events_path) { if (!open_input(events_path)) return 1; }
   else             { input_fp = stdin; }
 
-  load_tables(dir);
+  load_tables(dir, gdir);
 
   return (nstep > 0) ? run_chained(T, nstep)
                      : run_seed_reps(T, stride, replications);

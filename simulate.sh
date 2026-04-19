@@ -5,4 +5,4 @@
 set -e
 S=$1
 ./session -D data/train.raw -S data/sessions.raw -s "$S" \
-  | ./onestep -m "/tmp/tables$S" -T 1 -S 100 -R 42 > "/tmp/sim$S.raw"
+  | ./onestep -m "/tmp/neonka/tables/$S" -T 1 -S 100 -R 42 > "/tmp/neonka/sim/sim$S.raw"

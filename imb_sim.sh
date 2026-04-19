@@ -4,8 +4,8 @@
 set -e
 S=$1
 K=${K:-50}
-D=/tmp/tables$S
-O=/tmp/imb_$S
+D=/tmp/neonka/tables/$S
+O=/tmp/neonka/sim/imb_$S
 mkdir -p "$O"
 for r in $(seq 1 $K); do
   ./session -D data/train.raw -S data/sessions.raw -s "$S" \

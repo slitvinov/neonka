@@ -4,8 +4,8 @@
 set -e
 S=$1
 K=${K:-50}
-D=/tmp/tables$S
-P=/tmp/hawkes$S.params
-O=/tmp/t55_h8_$S.raw
+D=/tmp/neonka/tables/$S
+P=/tmp/neonka/hawkes/$S.params
+O=/tmp/neonka/sim/t55_h8_$S.raw
 ./onestep -D data/train.events -S data/sessions.events.raw -s "$S" \
           -m "$D" -T 55 -K 100 -j "$K" -M "$P" -Z -R 42 > "$O"
