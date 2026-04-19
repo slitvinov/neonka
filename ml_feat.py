@@ -49,8 +49,20 @@ def load_session(s, offs, ev_mm):
     books = idles[:, 5:54].astype(np.float64)
     idle_t = idles[:, 1].astype(np.int64)
     n = len(books)
-    ev_t = block[~is_idle, 1].astype(np.int64)
+    ev_t  = block[~is_idle, 1].astype(np.int64)
     ev_ty = types[~is_idle].astype(np.int64)
+    # Pre-event aN[0] / bN[0] for tm-split (N>1 → tm_q, N=1 → tm_c)
+    ev_aN0 = block[~is_idle, 37].astype(np.int64)
+    ev_bN0 = block[~is_idle, 45].astype(np.int64)
+    # Pooled 6-D type id per event: tp=0, tm_q=1, tm_c=2, dp=3, dm=4, hp=5
+    ev_pt = np.zeros(len(ev_ty), dtype=np.int64)
+    ev_pt[(ev_ty == 0) | (ev_ty == 1)] = 0                        # tp
+    is_tm_a = (ev_ty == 2); is_tm_b = (ev_ty == 3)
+    ev_pt[is_tm_a] = np.where(ev_aN0[is_tm_a] > 1, 1, 2)
+    ev_pt[is_tm_b] = np.where(ev_bN0[is_tm_b] > 1, 1, 2)
+    ev_pt[(ev_ty == 4) | (ev_ty == 5)] = 3                        # dp
+    ev_pt[(ev_ty == 6) | (ev_ty == 7)] = 4                        # dm
+    ev_pt[ev_ty >= 9] = 5                                         # hp (if present)
 
     cum_top_cnt = np.concatenate([[0], np.cumsum(SIGN_TOP_CNT[ev_ty])])
     cum_deep_cnt = np.concatenate([[0], np.cumsum(SIGN_DEEP_CNT[ev_ty])])
@@ -122,12 +134,13 @@ def load_session(s, offs, ev_mm):
     n_sym_base = 13
     n_anti_base = 12
 
-    # Hawkes memory φ per event type — the sim's internal state variable.
-    # φ_c(t) = Σ_{past events of type c} exp(-β(t - t_event))
-    # Use session-specific β and α, μ from the fitted params.
+    # Hawkes memory φ per POOLED event type (6-D: tp, tm_q, tm_c, dp, dm, hp).
+    # φ_c(t) = Σ_{past events of pooled type c} exp(-β(t - t_event))
+    # Params loaded from 6-D tm-split fit (preproc_events.py pooling).
     pp = f'/tmp/hawkes{s}.params'
     H_BETA = 0.05
-    h_mu = np.zeros(8); h_alpha = np.zeros((8, 8))
+    D = 6
+    h_mu = np.zeros(D); h_alpha = np.zeros((D, D))
     if os.path.exists(pp):
         with open(pp) as f:
             for ln in f:
@@ -137,59 +150,34 @@ def load_session(s, offs, ev_mm):
                     H_BETA = float(parts[1])
                 elif parts[0] == 'mu':
                     c = int(parts[1])
-                    if c < 8: h_mu[c] = float(parts[2])
+                    if c < D: h_mu[c] = float(parts[2])
                 elif parts[0] == 'alpha':
                     c = int(parts[1]); j = int(parts[2])
-                    if c < 8 and j < 8: h_alpha[c, j] = float(parts[3])
-    n_types = 8
-    phi_per_seed = np.zeros((len(seeds), n_types), dtype=np.float64)
-    phi = np.zeros(n_types, dtype=np.float64)
-    # Walk through events, tracking phi decayed to each seed's row-time.
-    # seed_row is sorted ascending (seeds are increasing idle indices).
+                    if c < D and j < D: h_alpha[c, j] = float(parts[3])
+
+    phi_per_seed = np.zeros((len(seeds), D), dtype=np.float64)
+    phi = np.zeros(D, dtype=np.float64)
     ev_i = 0
     prev_t = 0
     for k, srow in enumerate(seed_row):
-        # Process all events up to and including srow
         while ev_i < len(ev_t) and ev_t[ev_i] <= srow:
             t_ev = ev_t[ev_i]
             dt = t_ev - prev_t
-            if dt > 0:
-                phi *= np.exp(-H_BETA * dt)
-            c = ev_ty[ev_i]
-            if c < n_types:
-                phi[c] += 1.0
+            if dt > 0: phi *= np.exp(-H_BETA * dt)
+            c = ev_pt[ev_i]
+            if 0 <= c < D: phi[c] += 1.0
             prev_t = t_ev
             ev_i += 1
-        # Decay to seed time
         dt = srow - prev_t
-        phi_at_seed = phi * np.exp(-H_BETA * dt) if dt > 0 else phi.copy()
-        phi_per_seed[k] = phi_at_seed
+        phi_per_seed[k] = phi * np.exp(-H_BETA * dt) if dt > 0 else phi.copy()
 
-    # φ split into symmetric/antisymmetric pairs:
-    # type ordering: tp_a(0) tp_b(1) tm_a(2) tm_b(3) dp_a(4) dp_b(5) dm_a(6) dm_b(7)
-    def se_pair(x, y):
-        return (x + y), (x - y)
-    phi_tp_s, phi_tp_d = se_pair(phi_per_seed[:, 0], phi_per_seed[:, 1])
-    phi_tm_s, phi_tm_d = se_pair(phi_per_seed[:, 2], phi_per_seed[:, 3])
-    phi_dp_s, phi_dp_d = se_pair(phi_per_seed[:, 4], phi_per_seed[:, 5])
-    phi_dm_s, phi_dm_d = se_pair(phi_per_seed[:, 6], phi_per_seed[:, 7])
-    phi_sym  = [phi_tp_s[:, None], phi_tm_s[:, None],
-                phi_dp_s[:, None], phi_dm_s[:, None]]
-    phi_anti = [phi_tp_d[:, None], phi_tm_d[:, None],
-                phi_dp_d[:, None], phi_dm_d[:, None]]
+    # φ features are pooled (no ask/bid pair). All 6 values directly.
+    # Type order: [tp, tm_q, tm_c, dp, dm, hp]
+    phi_feats = [phi_per_seed[:, i:i+1] for i in range(D)]
 
-    # α·φ rate features: sim's instantaneous Hawkes intensity per type.
-    # rate_c(t) = μ_c + Σ_j α[c,j] · φ_j(t)
-    # 8 rates → 4 sym + 4 antisym (via ask/bid pairing).
-    rates = phi_per_seed @ h_alpha.T + h_mu[None, :]   # (n_seeds, 8)
-    rate_tp_s, rate_tp_d = se_pair(rates[:, 0], rates[:, 1])
-    rate_tm_s, rate_tm_d = se_pair(rates[:, 2], rates[:, 3])
-    rate_dp_s, rate_dp_d = se_pair(rates[:, 4], rates[:, 5])
-    rate_dm_s, rate_dm_d = se_pair(rates[:, 6], rates[:, 7])
-    rate_sym  = [rate_tp_s[:, None], rate_tm_s[:, None],
-                 rate_dp_s[:, None], rate_dm_s[:, None]]
-    rate_anti = [rate_tp_d[:, None], rate_tm_d[:, None],
-                 rate_dp_d[:, None], rate_dm_d[:, None]]
+    # α·φ rate features: sim's instantaneous Hawkes intensity per pooled type.
+    rates = phi_per_seed @ h_alpha.T + h_mu[None, :]        # (n_seeds, D)
+    rate_feats = [rates[:, i:i+1] for i in range(D)]
 
     # Micro-products (sim-state derivable — functions of current book)
     micro_feats = [
@@ -200,20 +188,15 @@ def load_session(s, offs, ev_mm):
     ]
     micro_signs = [-1, -1, +1, -1]               # 3 antisym, 1 sym
 
-    X = np.hstack(base_sym + phi_sym + rate_sym
-                  + base_anti + phi_anti + rate_anti
-                  + micro_feats).astype(np.float32)
+    X = np.hstack(base_sym + phi_feats + rate_feats
+                  + base_anti + micro_feats).astype(np.float32)
 
-    # Build sign vector aligned with X columns.
-    # Layout: base_sym(13) | phi_sym(4) | rate_sym(4) | base_anti(12) | phi_anti(4) | rate_anti(4) | micro(4)
+    # Layout: base_sym(13) | phi(D=6, sym) | rate(D=6, sym) | base_anti(12) | micro(4)
+    # Hawkes phi/rate are pooled (no ask/bid asymmetry), treated as sym under mirror.
     signs = np.ones(X.shape[1], dtype=np.float32)
-    o = n_sym_base + 4 + 4                       # skip base_sym + phi_sym + rate_sym (all +1)
+    o = n_sym_base + 2 * D                       # skip base_sym + phi + rate (all sym)
     signs[o : o + n_anti_base] = -1              # base_anti
     o += n_anti_base
-    signs[o : o + 4] = -1                        # phi_anti
-    o += 4
-    signs[o : o + 4] = -1                        # rate_anti
-    o += 4
     for i, s_m in enumerate(micro_signs):
         signs[o + i] = s_m
 

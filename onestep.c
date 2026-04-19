@@ -12,6 +12,7 @@ enum {
   IMB_BINS    = 6,       /* imb_bin cardinality */
   N_VIS       = 5,       /* visible pooled event types: tp, tm_q, tm_c, dp, dm */
   N_HAWKES    = 6,       /* + hp (hidden-book surfacings) */
+  HK_K        = 3,       /* mixture kernel components (geom β spacing) */
   REC_COLS    = 54,      /* int32 columns per event record (train.events) */
   ROW_COLS    = 49,      /* int32 columns per raw book row */
   EV_IDLE     = 8,       /* event-type marker for end-of-row (train.events) */
@@ -22,7 +23,6 @@ enum {                   /* pooled event type indices (ask/bid merged) */
   EV_TP, EV_TM_Q, EV_TM_C, EV_DP, EV_DM, EV_HP
 };
 
-#define HK_BETA           0.05     /* fixed single-exponential kernel decay */
 #define DIFFUSE_THRESHOLD 0.95     /* refill.k=2 mass below this ⇒ sample tail */
 #define TAIL_ALPHA_MAX   -1.05     /* need α < this for finite tail integral */
 #define TAIL_CAP_FACTOR   3        /* truncate power law at k_max = F·k_cutoff */
@@ -52,7 +52,8 @@ static const char *events_path = NULL, *idx_path = NULL;
 static long session_id = -1;
 
 static struct KV tp_a[IMB_BINS], tp_b[IMB_BINS];
-static struct KV tm_a[IMB_BINS], tm_b[IMB_BINS];
+static struct KV tm_q_a[IMB_BINS], tm_q_b[IMB_BINS];
+static struct KV tm_c_a[IMB_BINS], tm_c_b[IMB_BINS];
 static struct KV dp_a[IMB_BINS], dp_b[IMB_BINS];
 static struct KV dm_a[IMB_BINS], dm_b[IMB_BINS];
 static struct KV n_imb[IMB_BINS];
@@ -60,7 +61,6 @@ static int imb_loaded = 0;
 
 static struct KV tp_own, dp_own;
 static struct KV tp_own_sp[SP_MAX], dp_own_sp[SP_MAX];
-
 static struct KV refill;              /* pooled ask+bid refill histogram */
 static int refill_diffuse = 0;
 
@@ -69,9 +69,10 @@ static int use_tail = 0;
 
 static int hk_loaded = 0;
 static int use_state_mu = 0;
-static double hk_mu[N_HAWKES], hk_alpha[N_HAWKES][N_HAWKES];
-static double hk_phi[N_HAWKES], hk_phi_stat[N_HAWKES];
-static double hk_mu_scale = 1.0;          /* shared scale for state-μ baseline */
+static double hk_beta[HK_K] = {0.5, 0.05, 0.005};
+static double hk_mu[N_HAWKES], hk_alpha[N_HAWKES][N_HAWKES][HK_K];
+static double hk_phi[N_HAWKES][HK_K], hk_phi_stat[N_HAWKES][HK_K];
+static double hk_mu_scale = 1.0;           /* shared scale for state-μ baseline */
 
 static int reset_phi = 1;
 
@@ -149,6 +150,10 @@ static int load_kv(const char *path, struct KV *t) {
   return t->n;
 }
 
+/* Linear interpolation inside the sampled range.  Past t->k[n-1] the value
+ * is kept flat (training-edge estimate) — this is the minimum-risk choice
+ * for rates that may extrapolate to 0 (e.g. tm at wide sp).  Callers that
+ * want positive extrapolation (tp close-gap) use lookup_tail_max below. */
 static double lookup(struct KV *t, double k) {
   if (t->n == 0) return 0.0;
   if (k <= t->k[0]) return t->v[0];
@@ -159,6 +164,18 @@ static double lookup(struct KV *t, double k) {
       return t->v[i - 1] * (1 - a) + t->v[i] * a;
     }
   return t->v[t->n - 1];
+}
+
+/* Like lookup(), but past the sampled range use the maximum value observed
+ * over the top quarter of sp bins.  Prevents edge-of-training zeros from
+ * creating dead-zone fixed points in the sim. */
+static double lookup_tail_max(struct KV *t, double k) {
+  if (t->n == 0) return 0.0;
+  if (k < t->k[t->n - 1]) return lookup(t, k);
+  double m = 0;
+  int start = (t->n * 3) / 4;
+  for (int i = start; i < t->n; i++) if (t->v[i] > m) m = t->v[i];
+  return m;
 }
 
 static double sample_dist(struct KV *t) {
@@ -173,8 +190,17 @@ static double sample_dist(struct KV *t) {
   return t->k[t->n - 1];
 }
 
+/* Return the sp-conditional table at (or closest-below) the given spread.
+ * Beyond the last populated sp, reuse the largest one rather than falling
+ * back to the pooled (sp-agnostic) dist — the latter has almost no mass
+ * at large jumps, so the sim can't close a wide gap in one event. */
 static struct KV *pick_sp_kv(struct KV *sp_tbl, int32_t sp, struct KV *fallback) {
-  if (sp >= 0 && sp < SP_MAX && sp_tbl[sp].n > 0) return &sp_tbl[sp];
+  if (sp < 0) sp = 0;
+  if (sp >= SP_MAX) sp = SP_MAX - 1;
+  for (int s = sp; s >= 0; s--)
+    if (sp_tbl[s].n > 0) return &sp_tbl[s];
+  for (int s = sp + 1; s < SP_MAX; s++)
+    if (sp_tbl[s].n > 0) return &sp_tbl[s];
   return fallback;
 }
 
@@ -228,29 +254,43 @@ static int32_t sample_refill(void) {
 
 /* ── Hawkes params (10-D) ─────────────────────────────────────────────────── */
 
+/* Reads mixture-kernel params. File format:
+ *   beta  <k>           <β_k>           (k = 0..HK_K-1)
+ *   mu    <c>           <μ_c>
+ *   alpha <c> <j> <k>   <α_{c,j,k}>
+ *
+ * Stationary λ from E[λ_c] = μ_c + Σ_j Σ_k (α[c,j,k]/β_k)·λ_j, i.e.
+ *   (I − B)·λ = μ  where  B[c,j] = Σ_k α[c,j,k]/β_k.
+ * Then E[φ_{j,k}] = λ_j / β_k. */
 static int load_hawkes(const char *path) {
   FILE *f = fopen(path, "r");
   if (!f) return 0;
   memset(hk_mu, 0, sizeof hk_mu);
   memset(hk_alpha, 0, sizeof hk_alpha);
-  char tag[32]; double v; int c, j;
+  char tag[32]; double v; int c, j, kk;
   while (fscanf(f, "%31s", tag) == 1) {
-    if (!strcmp(tag, "beta")) { double b; if (fscanf(f, "%lf", &b) != 1) break; }
-    else if (!strcmp(tag, "mu")) {
+    if (!strcmp(tag, "beta")) {
+      if (fscanf(f, "%d %lf", &kk, &v) != 2) break;
+      if (kk >= 0 && kk < HK_K) hk_beta[kk] = v;
+    } else if (!strcmp(tag, "mu")) {
       if (fscanf(f, "%d %lf", &c, &v) != 2) break;
       if (c >= 0 && c < N_HAWKES) hk_mu[c] = v;
     } else if (!strcmp(tag, "alpha")) {
-      if (fscanf(f, "%d %d %lf", &c, &j, &v) != 3) break;
-      if (c >= 0 && c < N_HAWKES && j >= 0 && j < N_HAWKES) hk_alpha[c][j] = v;
+      if (fscanf(f, "%d %d %d %lf", &c, &j, &kk, &v) != 4) break;
+      if (c >= 0 && c < N_HAWKES && j >= 0 && j < N_HAWKES && kk >= 0 && kk < HK_K)
+        hk_alpha[c][j][kk] = v;
     } else break;
   }
   fclose(f);
 
   double A[N_HAWKES][N_HAWKES + 1];
-  for (int c = 0; c < N_HAWKES; c++) {
-    for (int j = 0; j < N_HAWKES; j++)
-      A[c][j] = (c == j ? 1.0 : 0.0) - hk_alpha[c][j] / HK_BETA;
-    A[c][N_HAWKES] = hk_mu[c];
+  for (int cc = 0; cc < N_HAWKES; cc++) {
+    for (int jj = 0; jj < N_HAWKES; jj++) {
+      double b = 0;
+      for (int k = 0; k < HK_K; k++) b += hk_alpha[cc][jj][k] / hk_beta[k];
+      A[cc][jj] = (cc == jj ? 1.0 : 0.0) - b;
+    }
+    A[cc][N_HAWKES] = hk_mu[cc];
   }
   for (int p = 0; p < N_HAWKES; p++) {
     int piv = p; double best = fabs(A[p][p]);
@@ -266,14 +306,18 @@ static int load_hawkes(const char *path) {
         for (int cc = p; cc < N_HAWKES + 1; cc++) A[r][cc] -= fac * A[p][cc];
       }
   }
-  for (int jj = 0; jj < N_HAWKES; jj++) {
-    hk_phi_stat[jj] = (A[jj][N_HAWKES] / A[jj][jj]) / HK_BETA;
-    hk_phi[jj]      = hk_phi_stat[jj];
-  }
+  double lambda[N_HAWKES];
+  for (int jj = 0; jj < N_HAWKES; jj++)
+    lambda[jj] = (A[jj][jj] != 0.0) ? A[jj][N_HAWKES] / A[jj][jj] : 0.0;
+  for (int jj = 0; jj < N_HAWKES; jj++)
+    for (int k = 0; k < HK_K; k++) {
+      hk_phi_stat[jj][k] = lambda[jj] / hk_beta[k];
+      hk_phi[jj][k]      = hk_phi_stat[jj][k];
+    }
   double total_mu = 0, total_stat = 0;
   for (int jj = 0; jj < N_HAWKES; jj++) {
     total_mu   += hk_mu[jj];
-    total_stat += hk_phi_stat[jj] * HK_BETA;
+    total_stat += lambda[jj];
   }
   double scale = (total_stat > 0) ? total_mu / total_stat : 1.0;
   if (scale < MU_SCALE_MIN) scale = MU_SCALE_MIN;
@@ -368,13 +412,16 @@ static void apply_dm(struct Row *r, int side) {
 
 /* ── rate computation ─────────────────────────────────────────────────────── */
 
-/* Pool side-specific imb rates: return (ask+bid) rate for given pooled type.
- * tm is split: tm_q and tm_c share the tm imb-table total (state-gated later). */
+/* tm_q (queue decrement) and tm_c (cascade) have very different dynamics;
+ * using the total tm rate for both overfires cascades at wide sp by ~4×.
+ * Asymmetric extrapolation: tp uses tail-max past training range (closes
+ * wide-spread gaps reliably); tm_q/tm_c/dp/dm use flat-last (don't
+ * manufacture widening events in the extrapolation zone). */
 static double pool_rate(int type, int im, int32_t sp) {
   switch (type) {
-    case EV_TP:   return lookup(&tp_a[im], sp) + lookup(&tp_b[im], sp);
-    case EV_TM_Q: return lookup(&tm_a[im], sp) + lookup(&tm_b[im], sp);
-    case EV_TM_C: return lookup(&tm_a[im], sp) + lookup(&tm_b[im], sp);
+    case EV_TP:   return lookup_tail_max(&tp_a[im], sp) + lookup_tail_max(&tp_b[im], sp);
+    case EV_TM_Q: return lookup(&tm_q_a[im], sp) + lookup(&tm_q_b[im], sp);
+    case EV_TM_C: return lookup(&tm_c_a[im], sp) + lookup(&tm_c_b[im], sp);
     case EV_DP:   return lookup(&dp_a[im], sp) + lookup(&dp_b[im], sp);
     case EV_DM:   return lookup(&dm_a[im], sp) + lookup(&dm_b[im], sp);
     default:      return 0;
@@ -390,16 +437,26 @@ static double compute_rates(struct Row *r, double rates[N_HAWKES]) {
   double total = 0;
   if (hk_loaded) {
     double mu[N_HAWKES];
-    if (use_state_mu && imb_loaded) {
+    int state_mode = use_state_mu && imb_loaded;
+    if (state_mode) {
       int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
-      for (int k = 0; k < N_VIS; k++) mu[k] = pool_rate(k, im, sp) * hk_mu_scale;
+      for (int k = 0; k < N_VIS; k++) mu[k] = pool_rate(k, im, sp);
       mu[EV_HP] = hk_mu[EV_HP];
     } else {
       for (int k = 0; k < N_HAWKES; k++) mu[k] = hk_mu[k];
     }
+    /* state_mode uses pool_rate as the state-conditional baseline (which already
+     * includes Hawkes clustering at that state). Add only the transient
+     * Hawkes deviation α·(φ − E[φ]) so stationary sim rate ≈ pool_rate.
+     * Non-state mode uses pure Hawkes: μ + α·φ. */
     for (int c = 0; c < N_HAWKES; c++) {
       double rc = mu[c];
-      for (int j = 0; j < N_HAWKES; j++) rc += hk_alpha[c][j] * hk_phi[j];
+      for (int j = 0; j < N_HAWKES; j++)
+        for (int k = 0; k < HK_K; k++) {
+          double phi_use = state_mode ? (hk_phi[j][k] - hk_phi_stat[j][k])
+                                      : hk_phi[j][k];
+          rc += hk_alpha[c][j][k] * phi_use;
+        }
       rates[c] = rc > 0 ? rc : 0;
     }
     /* State-gate tm_q / tm_c to available book configurations. */
@@ -478,7 +535,8 @@ static void simulate(struct Row *r, double T) {
   int32_t sp_limit = (sp0 > 0 ? sp0 : TICK) * SP_LIMIT_MULT + SP_LIMIT_OFFSET;
   r->y = 0;
   if (reset_phi && hk_loaded)
-    for (int k = 0; k < N_HAWKES; k++) hk_phi[k] = hk_phi_stat[k];
+    for (int j = 0; j < N_HAWKES; j++)
+      for (int k = 0; k < HK_K; k++) hk_phi[j][k] = hk_phi_stat[j][k];
   int n_rates = hk_loaded ? N_HAWKES : N_VIS;
 
   while (t < T) {
@@ -489,8 +547,10 @@ static void simulate(struct Row *r, double T) {
     double dt = -log(drand48()) / lam_star;
     if (t + dt > T) break;
     if (hk_loaded) {
-      double f = exp(-HK_BETA * dt);
-      for (int k = 0; k < N_HAWKES; k++) hk_phi[k] *= f;
+      double decay[HK_K];
+      for (int k = 0; k < HK_K; k++) decay[k] = exp(-hk_beta[k] * dt);
+      for (int j = 0; j < N_HAWKES; j++)
+        for (int k = 0; k < HK_K; k++) hk_phi[j][k] *= decay[k];
     }
     t += dt;
     double lam_now = compute_rates(r, rates);
@@ -501,7 +561,7 @@ static void simulate(struct Row *r, double T) {
       cum += rates[k];
       if (u < cum) { pick = k; break; }
     }
-    if (hk_loaded) hk_phi[pick] += 1.0;
+    if (hk_loaded) for (int k = 0; k < HK_K; k++) hk_phi[pick][k] += 1.0;
     if (pick == EV_HP) continue;                              /* HP phantom: φ only */
     int side = sample_side(pick, r);
     fire_event(r, pick, side, r->aR[0] - r->bR[0]);
