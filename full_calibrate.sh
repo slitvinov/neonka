@@ -14,7 +14,7 @@ echo "pass 1: base sim for all 62 sessions"
 for S in $(seq 0 61); do
   ./onestep -D data/train.events -S data/sessions.events.raw -s "$S" \
     -m "/tmp/neonka/tables/$S" -g /tmp/neonka/tables/common \
-    -M "/tmp/neonka/hawkes/$S.params" -Z -U \
+    -M "/tmp/neonka/hawkes/$S.params" \
     -T 55 -K 100 -j 1 -R 42 > "/tmp/neonka/sim/t55_base_$S.raw" 2>/dev/null
 done
 
@@ -88,7 +88,7 @@ echo "pass 3: sim with calibrated tables"
 for S in $(seq 0 61); do
   ./onestep -D data/train.events -S data/sessions.events.raw -s "$S" \
     -m "/tmp/neonka/tables/${S}_cal" -g /tmp/neonka/tables/common \
-    -M "/tmp/neonka/hawkes/$S.params" -Z -U \
+    -M "/tmp/neonka/hawkes/$S.params" \
     -T 55 -K 100 -j 1 -R 42 > "/tmp/neonka/sim/t55_h8_$S.raw" 2>/dev/null
 done
 echo "done — final sim in /tmp/neonka/sim/t55_h8_*.raw"

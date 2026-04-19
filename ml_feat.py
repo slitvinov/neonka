@@ -134,57 +134,49 @@ def load_session(s, offs, ev_mm):
     n_sym_base = 13
     n_anti_base = 12
 
-    # Hawkes memory φ per POOLED event type (6-D: tp, tm_q, tm_c, dp, dm, hp)
-    # with 3-exponential mixture kernel:
-    #   φ_{c,k}(t) = Σ_{past events of c} exp(−β_k (t − t_event)),  k ∈ {0,1,2}
-    # intensity: λ_c(t) = μ_c + Σ_{j,k} α_{c,j,k} φ_{j,k}(t)
+    # Hawkes memory φ per POOLED event type (6-D: tp, tm_q, tm_c, dp, dm, hp).
+    # Single-exponential kernel: φ_c(t) = Σ_{past events of c} exp(−β (t − t_ev)).
+    # Intensity: λ_c(t) = μ_c + Σ_j α_{c,j} φ_j(t).
     pp = f'/tmp/neonka/hawkes/{s}.params'
-    D, K = 6, 3
-    h_beta = np.array([0.5, 0.05, 0.005])   # defaults
-    h_mu = np.zeros(D); h_alpha = np.zeros((D, D, K))
+    D = 6
+    h_beta = 0.05
+    h_mu = np.zeros(D); h_alpha = np.zeros((D, D))
     if os.path.exists(pp):
         with open(pp) as f:
             for ln in f:
                 parts = ln.split()
                 if not parts: continue
                 if parts[0] == 'beta' and len(parts) >= 3:
-                    kk = int(parts[1])
-                    if 0 <= kk < K: h_beta[kk] = float(parts[2])
+                    h_beta = float(parts[2])
                 elif parts[0] == 'mu' and len(parts) >= 3:
                     c = int(parts[1])
                     if c < D: h_mu[c] = float(parts[2])
-                elif parts[0] == 'alpha' and len(parts) >= 5:
-                    c = int(parts[1]); j = int(parts[2]); kk = int(parts[3])
-                    if c < D and j < D and 0 <= kk < K:
-                        h_alpha[c, j, kk] = float(parts[4])
+                elif parts[0] == 'alpha' and len(parts) >= 4:
+                    c = int(parts[1]); j = int(parts[2])
+                    if c < D and j < D:
+                        h_alpha[c, j] = float(parts[3])
 
-    # phi has shape (D, K): one memory state per event-type per kernel decay.
-    phi_per_seed = np.zeros((len(seeds), D, K), dtype=np.float64)
-    phi = np.zeros((D, K), dtype=np.float64)
+    # phi has shape (D,) — one memory state per event type.
+    phi_per_seed = np.zeros((len(seeds), D), dtype=np.float64)
+    phi = np.zeros(D, dtype=np.float64)
     ev_i = 0
     prev_t = 0
     for k_seed, srow in enumerate(seed_row):
         while ev_i < len(ev_t) and ev_t[ev_i] <= srow:
             t_ev = ev_t[ev_i]
             dt = t_ev - prev_t
-            if dt > 0:
-                for kk in range(K): phi[:, kk] *= np.exp(-h_beta[kk] * dt)
+            if dt > 0: phi *= np.exp(-h_beta * dt)
             c = ev_pt[ev_i]
-            if 0 <= c < D: phi[c, :] += 1.0
+            if 0 <= c < D: phi[c] += 1.0
             prev_t = t_ev
             ev_i += 1
         dt = srow - prev_t
-        if dt > 0:
-            for kk in range(K): phi_per_seed[k_seed, :, kk] = phi[:, kk] * np.exp(-h_beta[kk] * dt)
-        else:
-            phi_per_seed[k_seed] = phi.copy()
+        phi_per_seed[k_seed] = phi * np.exp(-h_beta * dt) if dt > 0 else phi.copy()
 
-    # Feature set: total φ per event type (sum over K), plus per-k components.
-    phi_total = phi_per_seed.sum(axis=2)            # (n_seeds, D) — short+mid+long
-    phi_feats = [phi_total[:, i:i+1] for i in range(D)]
+    phi_feats = [phi_per_seed[:, i:i+1] for i in range(D)]
 
-    # α·φ rate: λ_c = μ_c + Σ_{j,k} α_{c,j,k} φ_{j,k}
-    rates = np.einsum('cjk,njk->nc', h_alpha, phi_per_seed) + h_mu[None, :]
+    # α·φ rate: λ_c = μ_c + Σ_j α_{c,j} φ_j
+    rates = phi_per_seed @ h_alpha.T + h_mu[None, :]
     rate_feats = [rates[:, i:i+1] for i in range(D)]
 
     # Micro-products (sim-state derivable — functions of current book)

@@ -12,7 +12,6 @@ enum {
   IMB_BINS    = 6,       /* imb_bin cardinality */
   N_VIS       = 5,       /* visible pooled event types: tp, tm_q, tm_c, dp, dm */
   N_HAWKES    = 6,       /* + hp (hidden-book surfacings) */
-  HK_K        = 3,       /* mixture kernel components (geom β spacing) */
   REC_COLS    = 54,      /* int32 columns per event record (train.events) */
   ROW_COLS    = 49,      /* int32 columns per raw book row */
   EV_IDLE     = 8,       /* event-type marker for end-of-row (train.events) */
@@ -27,10 +26,7 @@ enum {                   /* pooled event type indices (ask/bid merged) */
 #define TAIL_ALPHA_MAX   -1.05     /* need α < this for finite tail integral */
 #define TAIL_CAP_FACTOR   3        /* truncate power law at k_max = F·k_cutoff */
 #define U_FLOOR           1e-12    /* prevent log(0) in Ogata sampling */
-#define MU_SCALE_MIN      0.01     /* baseline-μ split clamp */
-#define MU_SCALE_MAX      1.00
-#define SP_LIMIT_MULT     10       /* bad-state guard: sp > sp0·MULT+OFFSET */
-#define SP_LIMIT_OFFSET   100
+#define SP_LIMIT_ABS      256      /* absolute spread cap (2× max observed real) */
 
 struct Row {
   int32_t aR[NL], bR[NL], aS[NL], bS[NL], aN[NL], bN[NL], y;
@@ -45,8 +41,8 @@ struct KV { int n; double k[TMAX]; double v[TMAX]; };
 
 struct TailParam { double alpha; int k_cutoff; double f_tail; };
 
-static int is_events_fmt = 0;
 static FILE *input_fp = NULL;
+static int is_events_fmt = 0;   /* set by open_input() when -D given */
 static off_t bytes_remaining = -1;
 static const char *events_path = NULL, *idx_path = NULL;
 static long session_id = -1;
@@ -57,7 +53,33 @@ static struct KV tm_c_a[IMB_BINS], tm_c_b[IMB_BINS];
 static struct KV dp_a[IMB_BINS], dp_b[IMB_BINS];
 static struct KV dm_a[IMB_BINS], dm_b[IMB_BINS];
 static struct KV n_imb[IMB_BINS];
-static int imb_loaded = 0;
+
+/* Queue-Reactive tables (Huang-Lehalle-Rosenbaum 2015): rate = f(sp, n_own).
+ * Event rates conditional on OWN side's top queue size plus spread.
+ * When loaded via `-q <dir>`, these override the imb-conditioned tables. */
+enum { N0_MAX = 32, QR_SP_MAX = 64, OPP_MAX = 4 };
+static double qr_tp_a[QR_SP_MAX][N0_MAX], qr_tp_b[QR_SP_MAX][N0_MAX];
+static double qr_tm_a[QR_SP_MAX][N0_MAX], qr_tm_b[QR_SP_MAX][N0_MAX];
+static double qr_dp_a[QR_SP_MAX][N0_MAX], qr_dp_b[QR_SP_MAX][N0_MAX];
+static double qr_dm_a[QR_SP_MAX][N0_MAX], qr_dm_b[QR_SP_MAX][N0_MAX];
+static int qr_loaded = 0;
+
+static int qr_hk_loaded = 0;  /* Hawkes loaded on top of QR (Wu2019 hybrid) */
+
+/* QR2: adds opposite-queue bucket to tp/tm rates (HLR's 3-D conditioning).
+ * Captures directional asymmetry QR misses (§14 drift at moderate imb). */
+static double qr2_tp_a[QR_SP_MAX][N0_MAX][OPP_MAX];
+static double qr2_tp_b[QR_SP_MAX][N0_MAX][OPP_MAX];
+static double qr2_tm_a[QR_SP_MAX][N0_MAX][OPP_MAX];
+static double qr2_tm_b[QR_SP_MAX][N0_MAX][OPP_MAX];
+static int qr2_loaded = 0;
+
+static int opp_bucket_of(int n) {
+  if (n == 0) return 0;
+  if (n <= 2) return 1;
+  if (n <= 5) return 2;
+  return 3;
+}
 
 static struct KV tp_own, dp_own;
 static struct KV tp_own_sp[SP_MAX], dp_own_sp[SP_MAX];
@@ -65,14 +87,17 @@ static struct KV refill;              /* pooled ask+bid refill histogram */
 static int refill_diffuse = 0;
 
 static struct TailParam tail = {0.0, 0, 0.0};   /* pooled tail params */
-static int use_tail = 0;
 
-static int hk_loaded = 0;
-static int use_state_mu = 0;
-static double hk_beta[HK_K] = {0.5, 0.05, 0.005};
-static double hk_mu[N_HAWKES], hk_alpha[N_HAWKES][N_HAWKES][HK_K];
-static double hk_phi[N_HAWKES][HK_K], hk_phi_stat[N_HAWKES][HK_K];
-static double hk_mu_scale = 1.0;           /* shared scale for state-μ baseline */
+static double hk_beta = 0.05;
+static double hk_mu[N_HAWKES], hk_alpha[N_HAWKES][N_HAWKES];
+static double hk_phi[N_HAWKES], hk_phi_stat[N_HAWKES];
+static double hk_lambda_stat[N_HAWKES];    /* stationary Hawkes intensity λ_c */
+
+/* Real-history φ: accumulated from pre-seed events, decayed in real time.
+ * Pre-warms hk_phi at each seed with data-conditioned clustering state. */
+static double real_phi[N_HAWKES];
+static int32_t real_last_t = 0;
+static int real_phi_init = 0;
 
 static int reset_phi = 1;
 
@@ -85,6 +110,36 @@ static struct Side side_view(struct Row *r, int side) {
   s.S = side ? r->bS : r->aS;
   s.F = side ? r->bF : r->aF;
   return s;
+}
+
+/* Map events-format raw type (+ pre-event N[0]) to the 6-D pooled index used
+ * by the Hawkes fit.  Mirrors preproc.c's tm-split by pre-event queue size. */
+static int pooled_event_type(int32_t raw_type, int32_t aN0, int32_t bN0) {
+  if (raw_type == 0 || raw_type == 1) return 0;              /* tp */
+  if (raw_type == 2) return aN0 > 1 ? 1 : 2;                 /* tm_a → q or c */
+  if (raw_type == 3) return bN0 > 1 ? 1 : 2;                 /* tm_b */
+  if (raw_type == 4 || raw_type == 5) return 3;              /* dp */
+  if (raw_type == 6 || raw_type == 7) return 4;              /* dm */
+  if (raw_type >= 9)                  return 5;              /* hp */
+  return -1;
+}
+
+static void real_phi_decay_to(int32_t t_target) {
+  int32_t dt = t_target - real_last_t;
+  if (dt <= 0) return;
+  double dec = exp(-hk_beta * dt);
+  for (int j = 0; j < N_HAWKES; j++) real_phi[j] *= dec;
+  real_last_t = t_target;
+}
+
+static void real_phi_add_event(int32_t t_ev, int c) {
+  if (!real_phi_init) {
+    memcpy(real_phi, hk_phi_stat, sizeof real_phi);
+    real_last_t = t_ev;
+    real_phi_init = 1;
+  }
+  real_phi_decay_to(t_ev);
+  real_phi[c] += 1.0;
 }
 
 static int imb_bin(int32_t aN0, int32_t bN0, int32_t aN1, int32_t bN1) {
@@ -104,7 +159,14 @@ static int read_wire(struct Row *r, FILE *f) {
       if (fread(w, recsz, 1, f) != 1) return 0;
       if (bytes_remaining >= 0) bytes_remaining -= recsz;
       if (w[0] == EV_IDLE) break;
+      /* Accumulate real event → real_phi for warm-start at next seed.
+       * Only QR-without-Hawkes skips this (pure memoryless). */
+      if (!qr_loaded || qr_hk_loaded) {
+        int c = pooled_event_type(w[0], w[5 + 32], w[5 + 40]);
+        if (c >= 0) real_phi_add_event(w[1], c);
+      }
     }
+    if ((!qr_loaded || qr_hk_loaded) && real_phi_init) real_phi_decay_to(w[1]);
     memset(r, 0, sizeof *r);
     memcpy(r->aR, &w[5 + 0 * NL], NL * 4);
     memcpy(r->bR, &w[5 + 1 * NL], NL * 4);
@@ -246,22 +308,23 @@ static int32_t sample_tail(const struct TailParam *t) {
 }
 
 static int32_t sample_refill(void) {
-  if (use_tail && tail.f_tail > 0.0 && drand48() < tail.f_tail)
-    return sample_tail(&tail);
+  /* Heavy-tail branch auto-engages when refill.*.tail files exist
+   * (f_tail > 0 after load_tail_param).  Otherwise fall back to the
+   * empirical refill histogram, or TICK if that's also absent. */
+  if (tail.f_tail > 0.0 && drand48() < tail.f_tail) return sample_tail(&tail);
   int32_t dist = (refill_diffuse && refill.n > 0) ? (int32_t)sample_dist(&refill) : TICK;
   return dist <= 0 ? TICK : dist;
 }
 
-/* ── Hawkes params (10-D) ─────────────────────────────────────────────────── */
+/* ── Hawkes params (6-D single-exponential kernel) ────────────────────────── */
 
-/* Reads mixture-kernel params. File format:
- *   beta  <k>           <β_k>           (k = 0..HK_K-1)
- *   mu    <c>           <μ_c>
- *   alpha <c> <j> <k>   <α_{c,j,k}>
+/* Reads single-β Hawkes params. File format:
+ *   beta  0           <β>
+ *   mu    <c>         <μ_c>
+ *   alpha <c> <j>     <α_{c,j}>
  *
- * Stationary λ from E[λ_c] = μ_c + Σ_j Σ_k (α[c,j,k]/β_k)·λ_j, i.e.
- *   (I − B)·λ = μ  where  B[c,j] = Σ_k α[c,j,k]/β_k.
- * Then E[φ_{j,k}] = λ_j / β_k. */
+ * Stationary λ solves (I − B)·λ = μ where B[c,j] = α[c,j]/β.
+ * Then E[φ_j] = λ_j / β. */
 static int load_hawkes(const char *path) {
   FILE *f = fopen(path, "r");
   if (!f) return 0;
@@ -271,25 +334,23 @@ static int load_hawkes(const char *path) {
   while (fscanf(f, "%31s", tag) == 1) {
     if (!strcmp(tag, "beta")) {
       if (fscanf(f, "%d %lf", &kk, &v) != 2) break;
-      if (kk >= 0 && kk < HK_K) hk_beta[kk] = v;
+      if (kk == 0) hk_beta = v;
     } else if (!strcmp(tag, "mu")) {
       if (fscanf(f, "%d %lf", &c, &v) != 2) break;
       if (c >= 0 && c < N_HAWKES) hk_mu[c] = v;
     } else if (!strcmp(tag, "alpha")) {
-      if (fscanf(f, "%d %d %d %lf", &c, &j, &kk, &v) != 4) break;
-      if (c >= 0 && c < N_HAWKES && j >= 0 && j < N_HAWKES && kk >= 0 && kk < HK_K)
-        hk_alpha[c][j][kk] = v;
+      if (fscanf(f, "%d %d %lf", &c, &j, &v) != 3) break;
+      if (c >= 0 && c < N_HAWKES && j >= 0 && j < N_HAWKES)
+        hk_alpha[c][j] = v;
     } else break;
   }
   fclose(f);
 
+  /* Solve (I − B)·λ = μ via Gauss-Jordan with partial pivoting. */
   double A[N_HAWKES][N_HAWKES + 1];
   for (int cc = 0; cc < N_HAWKES; cc++) {
-    for (int jj = 0; jj < N_HAWKES; jj++) {
-      double b = 0;
-      for (int k = 0; k < HK_K; k++) b += hk_alpha[cc][jj][k] / hk_beta[k];
-      A[cc][jj] = (cc == jj ? 1.0 : 0.0) - b;
-    }
+    for (int jj = 0; jj < N_HAWKES; jj++)
+      A[cc][jj] = (cc == jj ? 1.0 : 0.0) - hk_alpha[cc][jj] / hk_beta;
     A[cc][N_HAWKES] = hk_mu[cc];
   }
   for (int p = 0; p < N_HAWKES; p++) {
@@ -306,23 +367,12 @@ static int load_hawkes(const char *path) {
         for (int cc = p; cc < N_HAWKES + 1; cc++) A[r][cc] -= fac * A[p][cc];
       }
   }
-  double lambda[N_HAWKES];
-  for (int jj = 0; jj < N_HAWKES; jj++)
-    lambda[jj] = (A[jj][jj] != 0.0) ? A[jj][N_HAWKES] / A[jj][jj] : 0.0;
-  for (int jj = 0; jj < N_HAWKES; jj++)
-    for (int k = 0; k < HK_K; k++) {
-      hk_phi_stat[jj][k] = lambda[jj] / hk_beta[k];
-      hk_phi[jj][k]      = hk_phi_stat[jj][k];
-    }
-  double total_mu = 0, total_stat = 0;
   for (int jj = 0; jj < N_HAWKES; jj++) {
-    total_mu   += hk_mu[jj];
-    total_stat += lambda[jj];
+    double lambda = (A[jj][jj] != 0.0) ? A[jj][N_HAWKES] / A[jj][jj] : 0.0;
+    hk_lambda_stat[jj] = lambda;
+    hk_phi_stat[jj] = lambda / hk_beta;
+    hk_phi[jj]      = hk_phi_stat[jj];
   }
-  double scale = (total_stat > 0) ? total_mu / total_stat : 1.0;
-  if (scale < MU_SCALE_MIN) scale = MU_SCALE_MIN;
-  if (scale > MU_SCALE_MAX) scale = MU_SCALE_MAX;
-  hk_mu_scale = scale;
   return 1;
 }
 
@@ -432,55 +482,93 @@ static double pool_rate(int type, int im, int32_t sp) {
 static int tm_q_available(struct Row *r) { return r->aN[0] > 1 || r->bN[0] > 1; }
 static int tm_c_available(struct Row *r) { return r->aN[0] == 1 || r->bN[0] == 1; }
 
+static double qr_lookup(double grid[QR_SP_MAX][N0_MAX], int sp, int n0);
+static double qr2_lookup(double grid[QR_SP_MAX][N0_MAX][OPP_MAX],
+                         int sp, int n0, int opp);
+
+/* QR compute_rates: Queue-Reactive Poisson rates, no Hawkes.  Rates keyed by
+ * (sp, own_n0) for dp/dm; (sp, own_n0, opp_bucket) for tp/tm when qr2 loaded.
+ * The opp_bucket conditioning fixes HLR's cross-queue asymmetry that pure
+ * QR missed at moderate-imb states (§14 drift). */
+static double compute_rates_qr(struct Row *r, double rates[N_HAWKES]) {
+  int32_t sp = r->aR[0] - r->bR[0];
+  int an = r->aN[0], bn = r->bN[0];
+  int opp_a = opp_bucket_of(bn);   /* opp of ask = bid's n0 */
+  int opp_b = opp_bucket_of(an);   /* opp of bid = ask's n0 */
+  double tp, tm;
+  if (qr2_loaded) {
+    tp = qr2_lookup(qr2_tp_a, sp, an, opp_a) + qr2_lookup(qr2_tp_b, sp, bn, opp_b);
+    tm = qr2_lookup(qr2_tm_a, sp, an, opp_a) + qr2_lookup(qr2_tm_b, sp, bn, opp_b);
+  } else {
+    tp = qr_lookup(qr_tp_a, sp, an) + qr_lookup(qr_tp_b, sp, bn);
+    tm = qr_lookup(qr_tm_a, sp, an) + qr_lookup(qr_tm_b, sp, bn);
+  }
+  double dp = qr_lookup(qr_dp_a, sp, an) + qr_lookup(qr_dp_b, sp, bn);
+  double dm = qr_lookup(qr_dm_a, sp, an) + qr_lookup(qr_dm_b, sp, bn);
+  /* tm splits by state: tm_c needs n0==1 on some side; tm_q needs n0>1.
+   * Attribute tm mass to the available lane; rate is a lane selector. */
+  rates[EV_TP]   = tp;
+  rates[EV_TM_Q] = (an > 1 || bn > 1) ? tm : 0;
+  rates[EV_TM_C] = (an == 1 || bn == 1) ? tm : 0;
+  /* If both lanes available, split tm proportionally (heuristic: by n=1 side). */
+  if (rates[EV_TM_Q] > 0 && rates[EV_TM_C] > 0) {
+    double c_frac = ((an == 1) + (bn == 1)) / 2.0;
+    rates[EV_TM_C] = tm * c_frac;
+    rates[EV_TM_Q] = tm * (1.0 - c_frac);
+  }
+  rates[EV_DP]   = dp;
+  rates[EV_DM]   = dm;
+  rates[EV_HP]   = 0;
+
+  /* Wu-Rambaldi-Muzy-Bacry 2019: QR baseline + Hawkes clustering multiplier.
+   * When Hawkes params are loaded alongside QR, rate = λ_QR(s) × λ_H(t)/E[λ_H].
+   * At stationarity φ=E[φ] → multiplier=1, rate=λ_QR (state-only).
+   * During a burst → multiplier>1 → more events.  Captures temporal
+   * self-excitation on top of memoryless state-conditional rates. */
+  if (qr_hk_loaded) {
+    for (int c = 0; c < N_HAWKES; c++) {
+      double lam_curr = hk_mu[c];
+      for (int j = 0; j < N_HAWKES; j++) lam_curr += hk_alpha[c][j] * hk_phi[j];
+      double m = (hk_lambda_stat[c] > 0) ? lam_curr / hk_lambda_stat[c] : 1.0;
+      if (m < 0) m = 0;
+      rates[c] *= m;
+    }
+  }
+
+  double total = 0;
+  for (int c = 0; c < N_HAWKES; c++) total += rates[c];
+  return total;
+}
+
+/* Multiplicative rate: λ_c = pool_rate_c(state) × (λ_c^Hawkes / λ_c^stat).
+ *
+ *   λ_c^Hawkes = μ_c + Σ_j α[c,j]·φ_j      — current Hawkes intensity
+ *   λ_c^stat   = μ_c + Σ_j α[c,j]·(λ_j/β)  — stationary Hawkes intensity
+ *
+ * Decomposes cleanly: pool_rate sets the state-conditional magnitude; the
+ * ratio modulates it by how hot/cold recent history is.  At stationarity
+ * (φ = E[φ]), ratio = 1 and rate = pool_rate.  During a burst, ratio > 1.
+ * During a lull, ratio < 1.  No double-counting — state and temporal
+ * clustering are now independent concerns.
+ *
+ * State-gates drop tm_q / tm_c when their book configuration is absent. */
 static double compute_rates(struct Row *r, double rates[N_HAWKES]) {
   int32_t sp = r->aR[0] - r->bR[0];
+  int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
+  for (int c = 0; c < N_HAWKES; c++) {
+    double lam_curr = hk_mu[c];
+    for (int j = 0; j < N_HAWKES; j++)
+      lam_curr += hk_alpha[c][j] * hk_phi[j];
+    double mult = (hk_lambda_stat[c] > 0) ? lam_curr / hk_lambda_stat[c] : 1.0;
+    double base = (c < N_VIS) ? pool_rate(c, im, sp) : hk_mu[c];
+    rates[c] = base * mult;
+    if (rates[c] < 0) rates[c] = 0;
+  }
+  if (!tm_q_available(r)) rates[EV_TM_Q] = 0;
+  if (!tm_c_available(r)) rates[EV_TM_C] = 0;
+
   double total = 0;
-  if (hk_loaded) {
-    double mu[N_HAWKES];
-    int state_mode = use_state_mu && imb_loaded;
-    if (state_mode) {
-      int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
-      for (int k = 0; k < N_VIS; k++) mu[k] = pool_rate(k, im, sp);
-      mu[EV_HP] = hk_mu[EV_HP];
-    } else {
-      for (int k = 0; k < N_HAWKES; k++) mu[k] = hk_mu[k];
-    }
-    /* state_mode uses pool_rate as the state-conditional baseline (which
-     * already includes Hawkes clustering at that state). Add only the
-     * transient Hawkes deviation α·(φ − E[φ]) so stationary sim rate ≈
-     * pool_rate.  Non-state mode uses pure Hawkes: μ + α·φ. */
-    for (int c = 0; c < N_HAWKES; c++) {
-      double rc = mu[c];
-      for (int j = 0; j < N_HAWKES; j++)
-        for (int k = 0; k < HK_K; k++) {
-          double phi_use = state_mode ? (hk_phi[j][k] - hk_phi_stat[j][k])
-                                      : hk_phi[j][k];
-          rc += hk_alpha[c][j][k] * phi_use;
-        }
-      rates[c] = rc > 0 ? rc : 0;
-    }
-    /* State-gate tm_q / tm_c to available book configurations. */
-    if (!tm_q_available(r)) rates[EV_TM_Q] = 0;
-    if (!tm_c_available(r)) rates[EV_TM_C] = 0;
-    for (int c = 0; c < N_HAWKES; c++) total += rates[c];
-    return total;
-  }
-  /* Fallback: pooled imb rates, no Hawkes excitation. */
-  if (imb_loaded) {
-    int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
-    for (int k = 0; k < N_VIS; k++) rates[k] = pool_rate(k, im, sp);
-    if (!tm_q_available(r)) rates[EV_TM_Q] = 0;
-    if (!tm_c_available(r)) rates[EV_TM_C] = 0;
-    rates[EV_HP] = 0;
-    for (int k = 0; k < N_VIS; k++) total += rates[k];
-    if (total <= 0) return 0;
-    double nr = lookup(&n_imb[im], sp);
-    if (nr > 0 && nr < 1) {
-      double scale = (1.0 - nr) / total;
-      for (int k = 0; k < N_VIS; k++) rates[k] *= scale;
-      total = 1.0 - nr;
-    }
-  }
+  for (int c = 0; c < N_HAWKES; c++) total += rates[c];
   return total;
 }
 
@@ -494,29 +582,63 @@ static int sample_side(int type, struct Row *r) {
   if (allow_a && !allow_b) return 0;
   if (!allow_a && allow_b) return 1;
   if (!allow_a && !allow_b) return 0;
-  if (!imb_loaded) return drand48() < 0.5 ? 0 : 1;
   int32_t sp = r->aR[0] - r->bR[0];
-  int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
-  struct KV *a, *b;
-  switch (type) {
-    case EV_TP:                                 a = &tp_a[im]; b = &tp_b[im]; break;
-    case EV_TM_Q:                               a = &tm_q_a[im]; b = &tm_q_b[im]; break;
-    case EV_TM_C:                               a = &tm_c_a[im]; b = &tm_c_b[im]; break;
-    case EV_DP:                                 a = &dp_a[im]; b = &dp_b[im]; break;
-    case EV_DM:                                 a = &dm_a[im]; b = &dm_b[im]; break;
-    default:    return drand48() < 0.5 ? 0 : 1;
+  double ra, rb;
+  if (qr_loaded) {
+    int opp_a = opp_bucket_of(r->bN[0]);
+    int opp_b = opp_bucket_of(r->aN[0]);
+    /* tp/tm: use qr2 (3-D) if loaded, else qr (2-D).  dp/dm always qr. */
+    switch (type) {
+      case EV_TP:
+        if (qr2_loaded) {
+          ra = qr2_lookup(qr2_tp_a, sp, r->aN[0], opp_a);
+          rb = qr2_lookup(qr2_tp_b, sp, r->bN[0], opp_b);
+        } else {
+          ra = qr_lookup(qr_tp_a, sp, r->aN[0]);
+          rb = qr_lookup(qr_tp_b, sp, r->bN[0]);
+        } break;
+      case EV_TM_Q: case EV_TM_C:
+        if (qr2_loaded) {
+          ra = qr2_lookup(qr2_tm_a, sp, r->aN[0], opp_a);
+          rb = qr2_lookup(qr2_tm_b, sp, r->bN[0], opp_b);
+        } else {
+          ra = qr_lookup(qr_tm_a, sp, r->aN[0]);
+          rb = qr_lookup(qr_tm_b, sp, r->bN[0]);
+        } break;
+      case EV_DP:   ra = qr_lookup(qr_dp_a, sp, r->aN[0]);
+                    rb = qr_lookup(qr_dp_b, sp, r->bN[0]); break;
+      case EV_DM:   ra = qr_lookup(qr_dm_a, sp, r->aN[0]);
+                    rb = qr_lookup(qr_dm_b, sp, r->bN[0]); break;
+      default:      return drand48() < 0.5 ? 0 : 1;
+    }
+  } else {
+    int im = imb_bin(r->aN[0], r->bN[0], r->aN[1], r->bN[1]);
+    struct KV *a, *b;
+    switch (type) {
+      case EV_TP:                  a = &tp_a[im]; b = &tp_b[im]; break;
+      case EV_TM_Q:                a = &tm_q_a[im]; b = &tm_q_b[im]; break;
+      case EV_TM_C:                a = &tm_c_a[im]; b = &tm_c_b[im]; break;
+      case EV_DP:                  a = &dp_a[im]; b = &dp_b[im]; break;
+      case EV_DM:                  a = &dm_a[im]; b = &dm_b[im]; break;
+      default:     return drand48() < 0.5 ? 0 : 1;
+    }
+    ra = lookup(a, sp); rb = lookup(b, sp);
   }
-  double ra = lookup(a, sp), rb = lookup(b, sp);
   if (ra + rb <= 0) return drand48() < 0.5 ? 0 : 1;
   return drand48() * (ra + rb) < ra ? 0 : 1;
 }
 
 /* ── Ogata-thinned simulation loop ────────────────────────────────────────── */
 
-static int bad_state(struct Row *r, int32_t sp_limit) {
+/* Absolute bad-state guard, independent of starting sp.  Previously
+ * sp_limit = sp0 · MULT + OFFSET was computed fresh each simulate() call,
+ * so in chained mode the cap grew with the book's drift — the check
+ * became toothless once sp wandered into the dead zone.  Using a fixed
+ * multiple of the max real spread keeps the sim bounded. */
+static int bad_state(struct Row *r) {
   int32_t sp = r->aR[0] - r->bR[0];
   if (r->aN[0] == 0 || r->bN[0] == 0) { r->y = 1; return 1; }
-  if (sp > sp_limit || sp <= 0)       { r->y = 2; return 1; }
+  if (sp > SP_LIMIT_ABS || sp <= 0)   { r->y = 2; return 1; }
   return 0;
 }
 
@@ -530,82 +652,234 @@ static void fire_event(struct Row *r, int type, int side, int32_t sp) {
   }
 }
 
-static void simulate(struct Row *r, double T) {
-  double t = 0;
-  int32_t sp0 = r->aR[0] - r->bR[0];
-  int32_t sp_limit = (sp0 > 0 ? sp0 : TICK) * SP_LIMIT_MULT + SP_LIMIT_OFFSET;
-  r->y = 0;
-  if (reset_phi && hk_loaded)
-    for (int j = 0; j < N_HAWKES; j++)
-      for (int k = 0; k < HK_K; k++) hk_phi[j][k] = hk_phi_stat[j][k];
-  int n_rates = hk_loaded ? N_HAWKES : N_VIS;
+/* Exponential decay of all φ_j by dt with single β. */
+static void decay_phi(double dt) {
+  double dec = exp(-hk_beta * dt);
+  for (int j = 0; j < N_HAWKES; j++) hk_phi[j] *= dec;
+}
 
-  while (t < T) {
-    if (bad_state(r, sp_limit)) break;
-    double rates[N_HAWKES];
-    double lam_star = compute_rates(r, rates);
+/* Pick event type by inverse CDF on rates[0..n). */
+static int sample_event(const double *rates, int n, double total) {
+  double u = drand48() * total, cum = 0;
+  for (int k = 0; k < n; k++) {
+    cum += rates[k];
+    if (u < cum) return k;
+  }
+  return n - 1;
+}
+
+/* Ogata-thinned simulation: advance (r, t) until t reaches T (or bad state).
+ * Each iteration: draw Δt ~ Exp(λ*), decay φ, accept at p=λ(t)/λ*, fire event. */
+static void simulate(struct Row *r, double T) {
+  double t = 0, rates[N_HAWKES];
+  r->y = 0;
+  if (reset_phi && (!qr_loaded || qr_hk_loaded))
+    memcpy(hk_phi, real_phi_init ? real_phi : hk_phi_stat, sizeof hk_phi);
+
+  while (t < T && !bad_state(r)) {
+    double lam_star = qr_loaded ? compute_rates_qr(r, rates)
+                                : compute_rates(r, rates);
     if (lam_star <= 0) break;
     double dt = -log(drand48()) / lam_star;
     if (t + dt > T) break;
-    if (hk_loaded) {
-      double decay[HK_K];
-      for (int k = 0; k < HK_K; k++) decay[k] = exp(-hk_beta[k] * dt);
-      for (int j = 0; j < N_HAWKES; j++)
-        for (int k = 0; k < HK_K; k++) hk_phi[j][k] *= decay[k];
-    }
+    if (!qr_loaded || qr_hk_loaded) decay_phi(dt);
     t += dt;
-    double lam_now = compute_rates(r, rates);
-    if (drand48() * lam_star >= lam_now) continue;            /* Ogata reject */
-    double u = drand48() * lam_now, cum = 0;
-    int pick = n_rates - 1;
-    for (int k = 0; k < n_rates; k++) {
-      cum += rates[k];
-      if (u < cum) { pick = k; break; }
-    }
-    if (hk_loaded) for (int k = 0; k < HK_K; k++) hk_phi[pick][k] += 1.0;
-    if (pick == EV_HP) continue;                              /* HP phantom: φ only */
-    int side = sample_side(pick, r);
-    fire_event(r, pick, side, r->aR[0] - r->bR[0]);
-    if (bad_state(r, sp_limit)) return;
+
+    double lam_now = qr_loaded ? compute_rates_qr(r, rates)
+                               : compute_rates(r, rates);
+    if (drand48() * lam_star >= lam_now) continue;     /* Ogata reject */
+    int pick = sample_event(rates, N_HAWKES, lam_now);
+    if (!qr_loaded || qr_hk_loaded) hk_phi[pick] += 1.0;
+    if (pick == EV_HP) continue;                       /* HP phantom: φ only */
+    fire_event(r, pick, sample_side(pick, r), r->aR[0] - r->bR[0]);
   }
 }
 
 /* ── table loading orchestrator ───────────────────────────────────────────── */
 
+/* Build a path as "<dir>/<name>" into buf.  Truncation is silent — caller
+ * provides a buffer large enough for the paths we emit. */
+static void path_join(char *buf, size_t n, const char *dir, const char *name) {
+  snprintf(buf, n, "%s/%s", dir, name);
+}
+
 /* Try `global_dir/name` first (if given), else fall back to `local_dir/name`.
- * Lets rate tables stay per-session while jumps/refill come from a shared
- * pool across sessions (pool_jumps.py merges them into tables_common). */
-static int load_kv_fallback(const char *gdir, const char *ldir,
-                            const char *name, struct KV *t) {
+ * Rate tables stay per-session; jumps/refill come from a shared pool
+ * (pool_jumps.py merges them into tables_common). */
+static void load_kv_fallback(const char *gdir, const char *ldir,
+                             const char *name, struct KV *t) {
   char path[512];
   if (gdir) {
-    snprintf(path, sizeof path, "%s/%s", gdir, name);
-    if (load_kv(path, t)) return 1;
+    path_join(path, sizeof path, gdir, name);
+    if (load_kv(path, t)) return;
   }
-  snprintf(path, sizeof path, "%s/%s", ldir, name);
-  return load_kv(path, t);
+  path_join(path, sizeof path, ldir, name);
+  load_kv(path, t);
+}
+
+static void load_tail_fallback(const char *gdir, const char *ldir,
+                               const char *name, struct TailParam *tp) {
+  char path[512];
+  if (gdir) {
+    path_join(path, sizeof path, gdir, name);
+    load_tail_param(path, tp);
+    if (tp->alpha != 0.0 || tp->k_cutoff != 0) return;
+  }
+  path_join(path, sizeof path, ldir, name);
+  load_tail_param(path, tp);
+}
+
+/* Load QR2 table: rows are "sp n0 opp rate". */
+static int load_qr2_table(const char *path,
+                          double grid[QR_SP_MAX][N0_MAX][OPP_MAX]) {
+  FILE *f = fopen(path, "r");
+  if (!f) return 0;
+  int sp, n0, opp, nread = 0;
+  double v;
+  while (fscanf(f, "%d %d %d %lf", &sp, &n0, &opp, &v) == 4) {
+    if (sp >= 0 && sp < QR_SP_MAX && n0 >= 0 && n0 < N0_MAX
+        && opp >= 0 && opp < OPP_MAX) {
+      grid[sp][n0][opp] = v;
+      nread++;
+    }
+  }
+  fclose(f);
+  return nread;
+}
+
+/* Load QR table: rows are "sp n0 rate".  Fill the 2-D grid; unsampled cells
+ * stay zero and fall through to nearest-neighbor at lookup time. */
+static int load_qr_table(const char *path, double grid[QR_SP_MAX][N0_MAX]) {
+  FILE *f = fopen(path, "r");
+  if (!f) return 0;
+  int sp, n0, nread = 0;
+  double v;
+  while (fscanf(f, "%d %d %lf", &sp, &n0, &v) == 3) {
+    if (sp >= 0 && sp < QR_SP_MAX && n0 >= 0 && n0 < N0_MAX) {
+      grid[sp][n0] = v;
+      nread++;
+    }
+  }
+  fclose(f);
+  return nread;
+}
+
+/* QR2 lookup: 3-D (sp, n_own, opp_bucket). Falls back to QR 2-D if cell
+ * has zero samples (nearest-neighbor walk). */
+static double qr2_lookup(double grid[QR_SP_MAX][N0_MAX][OPP_MAX],
+                         int sp, int n0, int opp) {
+  if (sp < 0) sp = 0;  if (sp >= QR_SP_MAX) sp = QR_SP_MAX - 1;
+  if (n0 < 0) n0 = 0;  if (n0 >= N0_MAX)    n0 = N0_MAX - 1;
+  if (opp < 0) opp = 0; if (opp >= OPP_MAX)  opp = OPP_MAX - 1;
+  if (grid[sp][n0][opp] > 0) return grid[sp][n0][opp];
+  /* Nearest-neighbor: walk opp → n0 → sp. */
+  for (int o = opp; o >= 0; o--)
+    if (grid[sp][n0][o] > 0) return grid[sp][n0][o];
+  for (int n = n0; n >= 0; n--)
+    for (int o = 0; o < OPP_MAX; o++)
+      if (grid[sp][n][o] > 0) return grid[sp][n][o];
+  for (int s = sp; s >= 0; s--)
+    for (int n = 0; n < N0_MAX; n++)
+      for (int o = 0; o < OPP_MAX; o++)
+        if (grid[s][n][o] > 0) return grid[s][n][o];
+  return 0;
+}
+
+/* QR rate lookup with nearest-sp / nearest-n0 extrapolation.  Extends the
+ * sampled grid into unseen states by clamping to the closest observed cell. */
+static double qr_lookup(double grid[QR_SP_MAX][N0_MAX], int sp, int n0) {
+  if (sp < 0) sp = 0;  if (sp >= QR_SP_MAX) sp = QR_SP_MAX - 1;
+  if (n0 < 0) n0 = 0;  if (n0 >= N0_MAX)    n0 = N0_MAX - 1;
+  /* Walk sp backward then n0 backward for a non-zero cell. */
+  for (int s = sp; s >= 0; s--) {
+    for (int n = n0; n >= 0; n--)
+      if (grid[s][n] > 0) return grid[s][n];
+  }
+  return 0;
+}
+
+/* Helper: load "<dir>/<ev>.<side>.imb<im>.rates"; fail hard if missing. */
+static void load_imb_table(const char *dir, const char *ev, char side,
+                           int im, struct KV *t) {
+  char path[512];
+  snprintf(path, sizeof path, "%s/%s.%c.imb%d.rates", dir, ev, side, im);
+  if (!load_kv(path, t)) {
+    fprintf(stderr, "onestep: missing required table %s\n", path);
+    exit(1);
+  }
 }
 
 static void load_tables(const char *dir, const char *gdir) {
   char path[512];
-  imb_loaded = 1;
+  if (qr_loaded) {
+    /* QR mode: load 8 qr.*.rates tables (3-column sp n0 rate). */
+    const char *evs[] = {"tp", "tm", "dp", "dm"};
+    double (*grids_a[])[N0_MAX] = {qr_tp_a, qr_tm_a, qr_dp_a, qr_dm_a};
+    double (*grids_b[])[N0_MAX] = {qr_tp_b, qr_tm_b, qr_dp_b, qr_dm_b};
+    for (int i = 0; i < 4; i++) {
+      char p[512];
+      snprintf(p, sizeof p, "%s/qr.%s.a.rates", dir, evs[i]);
+      if (load_qr_table(p, grids_a[i]) == 0) {
+        fprintf(stderr, "onestep: missing QR table %s\n", p); exit(1);
+      }
+      snprintf(p, sizeof p, "%s/qr.%s.b.rates", dir, evs[i]);
+      if (load_qr_table(p, grids_b[i]) == 0) {
+        fprintf(stderr, "onestep: missing QR table %s\n", p); exit(1);
+      }
+    }
+    /* Optional QR2 (opposite-bucket) tables for tp and tm — if all 4 present,
+     * use the 3-D lookup for cross-queue asymmetry. */
+    char p[512];
+    int qr2_ok = 1;
+    snprintf(p, sizeof p, "%s/qr2.tp.a.rates", dir); if (!load_qr2_table(p, qr2_tp_a)) qr2_ok = 0;
+    snprintf(p, sizeof p, "%s/qr2.tp.b.rates", dir); if (!load_qr2_table(p, qr2_tp_b)) qr2_ok = 0;
+    snprintf(p, sizeof p, "%s/qr2.tm.a.rates", dir); if (!load_qr2_table(p, qr2_tm_a)) qr2_ok = 0;
+    snprintf(p, sizeof p, "%s/qr2.tm.b.rates", dir); if (!load_qr2_table(p, qr2_tm_b)) qr2_ok = 0;
+    qr2_loaded = qr2_ok;
+    /* Jump dists + refill still needed for event-effect sampling. */
+    load_kv_fallback(gdir, dir, "tp.own", &tp_own);
+    load_kv_fallback(gdir, dir, "dp.own", &dp_own);
+    for (int sp = 0; sp < SP_MAX; sp++) {
+      char name[32];
+      snprintf(name, sizeof name, "tp.own.sp%d", sp);
+      load_kv_fallback(gdir, dir, name, &tp_own_sp[sp]);
+      snprintf(name, sizeof name, "dp.own.sp%d", sp);
+      load_kv_fallback(gdir, dir, name, &dp_own_sp[sp]);
+    }
+    struct KV ra = {0}, rb = {0};
+    load_kv_fallback(gdir, dir, "refill.a.own", &ra);
+    load_kv_fallback(gdir, dir, "refill.b.own", &rb);
+    refill.n = 0;
+    for (int i = 0; i < ra.n; i++) {
+      refill.k[refill.n] = ra.k[i]; refill.v[refill.n] = ra.v[i]; refill.n++;
+    }
+    for (int i = 0; i < rb.n && refill.n < TMAX; i++) {
+      int found = 0;
+      for (int j = 0; j < ra.n; j++)
+        if (refill.k[j] == rb.k[i]) { refill.v[j] += rb.v[i]; found = 1; break; }
+      if (!found) { refill.k[refill.n] = rb.k[i]; refill.v[refill.n] = rb.v[i]; refill.n++; }
+    }
+    compute_diffuse_flag(&refill, &refill_diffuse);
+    return;
+  }
   for (int im = 0; im < IMB_BINS; im++) {
-    snprintf(path, sizeof path, "%s/tp.a.imb%d.rates", dir, im); if (!load_kv(path, &tp_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tp.b.imb%d.rates", dir, im); if (!load_kv(path, &tp_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm_q.a.imb%d.rates", dir, im); if (!load_kv(path, &tm_q_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm_q.b.imb%d.rates", dir, im); if (!load_kv(path, &tm_q_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm_c.a.imb%d.rates", dir, im); if (!load_kv(path, &tm_c_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/tm_c.b.imb%d.rates", dir, im); if (!load_kv(path, &tm_c_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/dp.a.imb%d.rates", dir, im); if (!load_kv(path, &dp_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/dp.b.imb%d.rates", dir, im); if (!load_kv(path, &dp_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/dm.a.imb%d.rates", dir, im); if (!load_kv(path, &dm_a[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/dm.b.imb%d.rates", dir, im); if (!load_kv(path, &dm_b[im])) imb_loaded = 0;
-    snprintf(path, sizeof path, "%s/n.imb%d.rates",    dir, im); load_kv(path, &n_imb[im]);
+    load_imb_table(dir, "tp",   'a', im, &tp_a[im]);
+    load_imb_table(dir, "tp",   'b', im, &tp_b[im]);
+    load_imb_table(dir, "tm_q", 'a', im, &tm_q_a[im]);
+    load_imb_table(dir, "tm_q", 'b', im, &tm_q_b[im]);
+    load_imb_table(dir, "tm_c", 'a', im, &tm_c_a[im]);
+    load_imb_table(dir, "tm_c", 'b', im, &tm_c_b[im]);
+    load_imb_table(dir, "dp",   'a', im, &dp_a[im]);
+    load_imb_table(dir, "dp",   'b', im, &dp_b[im]);
+    load_imb_table(dir, "dm",   'a', im, &dm_a[im]);
+    load_imb_table(dir, "dm",   'b', im, &dm_b[im]);
+    snprintf(path, sizeof path, "%s/n.imb%d.rates", dir, im);
+    load_kv(path, &n_imb[im]);
   }
   load_kv_fallback(gdir, dir, "tp.own", &tp_own);
   load_kv_fallback(gdir, dir, "dp.own", &dp_own);
   for (int sp = 0; sp < SP_MAX; sp++) {
-    char name[64];
+    char name[32];
     snprintf(name, sizeof name, "tp.own.sp%d", sp);
     load_kv_fallback(gdir, dir, name, &tp_own_sp[sp]);
     snprintf(name, sizeof name, "dp.own.sp%d", sp);
@@ -628,16 +902,16 @@ static void load_tables(const char *dir, const char *gdir) {
     }
   }
   compute_diffuse_flag(&refill, &refill_diffuse);
-  /* Pool tail params by averaging α and summing f_tail. */
-  struct TailParam ta, tb;
-  snprintf(path, sizeof path, "%s/refill.a.tail", dir); load_tail_param(path, &ta);
-  snprintf(path, sizeof path, "%s/refill.b.tail", dir); load_tail_param(path, &tb);
+  /* Pool tail params by averaging α and f_tail over present sides. */
+  struct TailParam ta = {0}, tb = {0};
+  load_tail_fallback(gdir, dir, "refill.a.tail", &ta);
+  load_tail_fallback(gdir, dir, "refill.b.tail", &tb);
   if (ta.alpha < 0 && tb.alpha < 0) {
-    tail.alpha = 0.5 * (ta.alpha + tb.alpha);
+    tail.alpha    = 0.5 * (ta.alpha + tb.alpha);
     tail.k_cutoff = (ta.k_cutoff + tb.k_cutoff) / 2;
-    tail.f_tail = 0.5 * (ta.f_tail + tb.f_tail);
-  } else if (ta.alpha < 0) { tail = ta; }
-  else if (tb.alpha < 0)  { tail = tb; }
+    tail.f_tail   = 0.5 * (ta.f_tail + tb.f_tail);
+  } else if (ta.alpha < 0) tail = ta;
+  else if (tb.alpha < 0)   tail = tb;
 }
 
 static int open_input(const char *path) {
@@ -707,14 +981,20 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "-N") && i + 1 < argc) nstep = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-K") && i + 1 < argc) stride = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-S") && i + 1 < argc) idx_path = argv[++i];
-    else if (!strcmp(argv[i], "-M") && i + 1 < argc) hk_loaded = load_hawkes(argv[++i]);
+    else if (!strcmp(argv[i], "-Q")) {
+      /* Enable Queue-Reactive mode: per-session qr.*.rates tables, pure Poisson. */
+      qr_loaded = 1;
+    }
+    else if (!strcmp(argv[i], "-M") && i + 1 < argc) {
+      if (!load_hawkes(argv[++i])) {
+        fprintf(stderr, "onestep: failed to load %s\n", argv[i]);
+        return 1;
+      }
+      qr_hk_loaded = 1;
+    }
     else if (!strcmp(argv[i], "-D") && i + 1 < argc) events_path = argv[++i];
     else if (!strcmp(argv[i], "-s") && i + 1 < argc) session_id = atol(argv[++i]);
     else if (!strcmp(argv[i], "-j") && i + 1 < argc) replications = atoi(argv[++i]);
-    else if (!strcmp(argv[i], "-e")) is_events_fmt = 1;
-    else if (!strcmp(argv[i], "-Z")) use_state_mu = 1;
-    else if (!strcmp(argv[i], "-U")) use_tail = 1;
-    else if (!strcmp(argv[i], "-L") && i + 1 < argc) (void)atoi(argv[++i]);
     else {
       fprintf(stderr, "onestep: unknown arg '%s'\n", argv[i]);
       return 1;

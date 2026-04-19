@@ -489,6 +489,92 @@ static void sec_drift_by_imb(struct Source *A, struct Source *B) {
   free(m2a); free(m2b); free(ia); free(ib);
 }
 
+/* Classify each adjacent (t, t+1) pair into a 5-way event type:
+ *   0 none,  1 ask_add,  2 ask_rem,  3 bid_add,  4 bid_rem
+ * Matches compare.py §25 — catches which side/direction fired each tick. */
+static int classify_event(struct Source *s, long t) {
+  int32_t aR0 = AR(s, t),   bR0 = BR(s, t);
+  int32_t aR1 = AR(s, t+1), bR1 = BR(s, t+1);
+  int32_t aN0 = AN(s, t),   bN0 = BN(s, t);
+  int32_t aN1 = AN(s, t+1), bN1 = BN(s, t+1);
+  if (aR1 == aR0 && aN1 > aN0) return 1;        /* ask_add (queue grew) */
+  if (aR1 != aR0 || aN1 < aN0) return 2;        /* ask_rem or move     */
+  if (bR1 == bR0 && bN1 > bN0) return 3;        /* bid_add */
+  if (bR1 != bR0 || bN1 < bN0) return 4;        /* bid_rem */
+  return 0;                                      /* no change */
+}
+
+static void sec_event_transitions(struct Source *A, struct Source *B) {
+  hdr("25. EVENT-TYPE TRANSITION  P(next | last) (%)");
+  const char *labels[5] = {"none", "a+", "a-", "b+", "b-"};
+  long cntA[5][5] = {{0}}, cntB[5][5] = {{0}};
+  if (A->n >= 3) {
+    int prev = classify_event(A, 0);
+    for (long t = 1; t < A->n - 1; t++) {
+      int cur = classify_event(A, t);
+      cntA[prev][cur]++; prev = cur;
+    }
+  }
+  if (B->n >= 3) {
+    int prev = classify_event(B, 0);
+    for (long t = 1; t < B->n - 1; t++) {
+      int cur = classify_event(B, t);
+      cntB[prev][cur]++; prev = cur;
+    }
+  }
+  printf("     %-8s  ", "from→");
+  for (int j = 0; j < 5; j++) printf(" %5s ", labels[j]);
+  printf("\n");
+  for (int i = 0; i < 5; i++) {
+    long sA = 0, sB = 0;
+    for (int j = 0; j < 5; j++) { sA += cntA[i][j]; sB += cntB[i][j]; }
+    if (sA < 50 && sB < 50) continue;
+    printf("  A  %-6s : ", labels[i]);
+    for (int j = 0; j < 5; j++)
+      printf(" %5.1f ", sA > 0 ? 100.0 * cntA[i][j] / sA : 0);
+    printf("\n  B  %-6s : ", labels[i]);
+    for (int j = 0; j < 5; j++)
+      printf(" %5.1f ", sB > 0 ? 100.0 * cntB[i][j] / sB : 0);
+    printf("\n");
+  }
+}
+
+/* Price impact: E[Δmid(t+k) | ask-removal at t].  Signals how sim vs real
+ * respond to a hit on the ask side.  Asymmetric impact over k reveals
+ * order-flow toxicity / momentum structure. */
+static void sec_price_impact(struct Source *A, struct Source *B) {
+  hdr("29. PRICE IMPACT  E[Δmid(t+k) | ask-event at t] (half-ticks)  k");
+  const int ks[] = {1, 2, 5, 10, 20};
+  const int NK = sizeof ks / sizeof *ks;
+  for (int ki = 0; ki < NK; ki++) {
+    int k = ks[ki];
+    double impA = NAN, impB = NAN;
+    long cntA = 0, cntB = 0;
+    for (int which = 0; which < 2; which++) {
+      struct Source *s = which ? B : A;
+      if (s->n < k + 2) continue;
+      double sum = 0; long n = 0;
+      for (long t = 0; t < s->n - k - 1; t++) {
+        int32_t aR0 = AR(s, t),   aR1 = AR(s, t+1);
+        int32_t aN0 = AN(s, t),   aN1 = AN(s, t+1);
+        int ask_rem = (aR1 > aR0) || (aR1 == aR0 && aN1 < aN0);
+        if (!ask_rem) continue;
+        double m_t  = 0.5 * (AR(s, t+1)   + BR(s, t+1));
+        double m_tk = 0.5 * (AR(s, t+1+k) + BR(s, t+1+k));
+        sum += m_tk - m_t; n++;
+      }
+      if (which) { cntB = n; if (n > 50) impB = sum / n; }
+      else       { cntA = n; if (n > 50) impA = sum / n; }
+    }
+    printf("  %4d  ", k);
+    if (!isnan(impA)) printf("%+*.4f", W, impA); else printf("%*s", W, "n/a");
+    printf("  ");
+    if (!isnan(impB)) printf("%+*.4f", W, impB); else printf("%*s", W, "n/a");
+    if (!isnan(impA) && !isnan(impB)) printf("  %+8.4f", impB - impA);
+    printf("  (nA=%ld nB=%ld)\n", cntA, cntB);
+  }
+}
+
 /* ── main ──────────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -515,6 +601,8 @@ int main(int argc, char **argv) {
   sec_price_prediction(&A, &B);
   sec_queue_imbalance(&A, &B);
   sec_drift_by_imb(&A, &B);
+  sec_event_transitions(&A, &B);
+  sec_price_impact(&A, &B);
 
   printf("\n======================================================================\n\n");
   free(A.rows); free(B.rows);

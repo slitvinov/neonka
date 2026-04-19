@@ -90,7 +90,7 @@ PY
   # Run T=55 sim with the new calibration
   ./onestep -D data/train.events -S data/sessions.events.raw -s "$SID" \
     -m "$OUTDIR" -g /tmp/neonka/tables/common \
-    -M "/tmp/neonka/hawkes/$SID.params" -Z -U \
+    -M "/tmp/neonka/hawkes/$SID.params" \
     -T 55 -K 100 -j 1 -R 42 > "$SIM_OUT"
 
   # Metrics summary

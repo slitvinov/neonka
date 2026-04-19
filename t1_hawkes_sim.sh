@@ -8,4 +8,4 @@ D=/tmp/neonka/tables/$S
 P=/tmp/neonka/hawkes/$S.params
 O=/tmp/neonka/sim/t1_h8_$S.raw
 ./onestep -D data/train.events -S data/sessions.events.raw -s "$S" \
-          -m "$D" -T 1 -K 100 -j "$K" -M "$P" -Z -R 42 > "$O"
+          -m "$D" -T 1 -K 100 -j "$K" -M "$P" -R 42 > "$O"

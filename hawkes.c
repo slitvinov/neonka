@@ -1,22 +1,24 @@
-/* hawkes.c — 6-D Hawkes MLE with K-exponential mixture kernel.
+/* hawkes.c — 6-D Hawkes MLE with single-exponential kernel (β=0.05 fixed).
  *
  * Model:
- *   λ_c(t) = μ_c + Σ_j Σ_k α_{c,j,k} · φ_{j,k}(t)
- *   φ_{j,k}(t) = Σ_{t_i^j < t} exp(-β_k · (t - t_i^j))
+ *   λ_c(t) = μ_c + Σ_j α_{c,j} · φ_j(t)
+ *   φ_j(t) = Σ_{t_i^j < t} exp(-β · (t - t_i^j))
  *
- * β_k geometrically spaced {0.5, 0.05, 0.005} — approximates power-law kernel
- * (Bacry-Jaisson 2016) over 3 decades of lag.
+ * β = 0.05 (half-life ≈ 14 ticks) matches the event-clustering timescale
+ * that actually modulates rates over our prediction horizons T≤55.  Earlier
+ * 3-exponential mixture (β∈{0.5, 0.05, 0.005}) added two kernels that
+ * either decay faster than T=1 or slower than T=55 — neither informative —
+ * so 3× the parameters for no observable benefit in downstream metrics.
  *
  * Stability: after each EM M-step, rescale each α row so that
- *   ρ_c := Σ_j Σ_k α[c,j,k]/β_k  ≤  RHO_MAX  (default 0.90)
- * By Gershgorin, max_c ρ_c ≥ spectral radius of effective branching matrix,
- * so row-wise clamping bounds ρ(B) ≤ RHO_MAX strictly.
+ *   ρ_c := Σ_j α[c,j]/β  ≤  RHO_MAX  (default 0.90)
+ * By Gershgorin, max_c ρ_c ≥ spectral radius of branching matrix.
  *
  * Input  (stdin): packed (int32 t, int32 type) in time order; types 0..5.
  * Output (stdout):
- *     beta <k> <value>
+ *     beta 0 <value>
  *     mu <c> <value>
- *     alpha <c> <j> <k> <value>
+ *     alpha <c> <j> <value>
  *
  * Usage: hawkes [-i N] [-t TOL] [-r RHO_MAX]
  */
@@ -26,8 +28,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { D = 6, K = 3 };
-static const double BETAS[K] = { 0.5, 0.05, 0.005 };
+enum { D = 6 };
+static const double BETA = 0.05;
 
 struct Event { int32_t t, type; };
 
@@ -38,11 +40,9 @@ int main(int argc, char **argv) {
     if      (!strcmp(argv[i], "-i") && i + 1 < argc) max_iter = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-t") && i + 1 < argc) tol      = atof(argv[++i]);
     else if (!strcmp(argv[i], "-r") && i + 1 < argc) rho_max  = atof(argv[++i]);
-    else if (!strcmp(argv[i], "-b") && i + 1 < argc) (void)atof(argv[++i]); /* legacy */
     else { fprintf(stderr, "hawkes: unknown arg '%s'\n", argv[i]); return 1; }
   }
-  fprintf(stderr, "hawkes: D=%d K=%d β={%.3f,%.3f,%.3f} ρ_max=%.2f\n",
-          D, K, BETAS[0], BETAS[1], BETAS[2], rho_max);
+  fprintf(stderr, "hawkes: D=%d β=%g ρ_max=%.2f\n", D, BETA, rho_max);
 
   size_t cap = 1 << 20, n = 0;
   struct Event *ev = malloc(cap * sizeof *ev);
@@ -62,22 +62,19 @@ int main(int argc, char **argv) {
   fprintf(stderr, "hawkes: %zu events T=%g rate=%.4f\n",
           n, T_total, (double)n / T_total);
 
-  /* Init: small α, spread roughly equally across k; gives initial ρ ≈ 0.3. */
+  /* Init: α/β = 0.005 uniform → ρ_c ≈ 0.03·6 = 0.18. */
   double mu[D];
-  static double alpha[D][D][K];
+  double alpha[D][D];
   for (int c = 0; c < D; c++) {
     mu[c] = 0.5 * (double)N_j[c] / T_total;
-    for (int j = 0; j < D; j++)
-      for (int k = 0; k < K; k++)
-        alpha[c][j][k] = 0.005 * BETAS[k];   /* α/β = 0.005 uniform */
+    for (int j = 0; j < D; j++) alpha[c][j] = 0.005 * BETA;
   }
 
-  static double phi[D][K], mu_num[D];
-  static double alpha_num[D][D][K], G[D][K];
+  double phi[D], mu_num[D];
+  double alpha_num[D][D], G[D];
 
   double ll_prev = -INFINITY;
-  int iter;
-  for (iter = 0; iter < max_iter; iter++) {
+  for (int iter = 0; iter < max_iter; iter++) {
     memset(phi, 0, sizeof phi);
     memset(mu_num, 0, sizeof mu_num);
     memset(alpha_num, 0, sizeof alpha_num);
@@ -87,34 +84,29 @@ int main(int argc, char **argv) {
 
     for (size_t i = 0; i < n; i++) {
       int32_t dt = ev[i].t - last_t;
-      if (dt > 0)
-        for (int k = 0; k < K; k++) {
-          double dec = exp(-BETAS[k] * dt);
-          for (int j = 0; j < D; j++) phi[j][k] *= dec;
-        }
+      if (dt > 0) {
+        double dec = exp(-BETA * dt);
+        for (int j = 0; j < D; j++) phi[j] *= dec;
+      }
       int c = ev[i].type;
       double lambda = mu[c];
-      for (int j = 0; j < D; j++)
-        for (int k = 0; k < K; k++) lambda += alpha[c][j][k] * phi[j][k];
+      for (int j = 0; j < D; j++) lambda += alpha[c][j] * phi[j];
       if (lambda < 1e-12) lambda = 1e-12;
       log_lambda_sum += log(lambda);
 
       mu_num[c] += mu[c] / lambda;
       for (int j = 0; j < D; j++)
-        for (int k = 0; k < K; k++)
-          alpha_num[c][j][k] += alpha[c][j][k] * phi[j][k] / lambda;
+        alpha_num[c][j] += alpha[c][j] * phi[j] / lambda;
 
-      for (int k = 0; k < K; k++)
-        G[c][k] += (1.0 - exp(-BETAS[k] * (double)(t1 - ev[i].t))) / BETAS[k];
-      for (int k = 0; k < K; k++) phi[c][k] += 1.0;
+      G[c] += (1.0 - exp(-BETA * (double)(t1 - ev[i].t))) / BETA;
+      phi[c] += 1.0;
       last_t = ev[i].t;
     }
 
     double comp = 0;
     for (int c = 0; c < D; c++) {
       comp += mu[c] * T_total;
-      for (int j = 0; j < D; j++)
-        for (int k = 0; k < K; k++) comp += alpha[c][j][k] * G[j][k];
+      for (int j = 0; j < D; j++) comp += alpha[c][j] * G[j];
     }
     double ll = log_lambda_sum - comp;
 
@@ -122,22 +114,18 @@ int main(int argc, char **argv) {
     for (int c = 0; c < D; c++) {
       mu[c] = mu_num[c] / T_total;
       for (int j = 0; j < D; j++)
-        for (int k = 0; k < K; k++)
-          if (G[j][k] > 0) alpha[c][j][k] = alpha_num[c][j][k] / G[j][k];
+        if (G[j] > 0) alpha[c][j] = alpha_num[c][j] / G[j];
     }
 
     /* Stability: row-wise branching clamp. Ensures ρ ≤ rho_max via Gershgorin. */
     double max_row_rho = 0;
     for (int c = 0; c < D; c++) {
       double row_rho = 0;
-      for (int j = 0; j < D; j++)
-        for (int k = 0; k < K; k++)
-          row_rho += alpha[c][j][k] / BETAS[k];
+      for (int j = 0; j < D; j++) row_rho += alpha[c][j] / BETA;
       if (row_rho > max_row_rho) max_row_rho = row_rho;
       if (row_rho > rho_max) {
         double scale = rho_max / row_rho;
-        for (int j = 0; j < D; j++)
-          for (int k = 0; k < K; k++) alpha[c][j][k] *= scale;
+        for (int j = 0; j < D; j++) alpha[c][j] *= scale;
       }
     }
 
@@ -151,12 +139,11 @@ int main(int argc, char **argv) {
   }
 
   /* Output */
-  for (int k = 0; k < K; k++) printf("beta %d %g\n", k, BETAS[k]);
+  printf("beta 0 %g\n", BETA);
   for (int c = 0; c < D; c++) printf("mu %d %g\n", c, mu[c]);
   for (int c = 0; c < D; c++)
     for (int j = 0; j < D; j++)
-      for (int k = 0; k < K; k++)
-        printf("alpha %d %d %d %g\n", c, j, k, alpha[c][j][k]);
+      printf("alpha %d %d %g\n", c, j, alpha[c][j]);
 
   free(ev);
   return 0;

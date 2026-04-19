@@ -8,7 +8,8 @@ import os, numpy as np, glob
 
 FEAT_DIR = '/tmp/neonka/mlfeat'
 SIM_DIR = '/tmp/neonka/sim'
-N_REP = 200
+N_REP = int(os.environ.get('N_REP', '200'))
+SIM_PREFIX = os.environ.get('SIM_PREFIX', f't55_j{N_REP}')
 
 # Start clean: load the features without any prior sim columns.  We detect
 # stale sim columns by re-running ml_feat first to get a pristine base.
@@ -27,7 +28,7 @@ new_signs = np.concatenate([signs, [-1.0]])
 
 for s in range(62):
     fp = f'{FEAT_DIR}/s{s}.npz'
-    sp = f'{SIM_DIR}/t55_j200_{s}.raw'
+    sp = f'{SIM_DIR}/{SIM_PREFIX}_{s}.raw'
     if not os.path.exists(fp) or not os.path.exists(sp): continue
     Z = np.load(fp)
     X = Z['X']
