@@ -65,6 +65,7 @@ static double qr_dm_a[QR_SP_MAX][N0_MAX], qr_dm_b[QR_SP_MAX][N0_MAX];
 static int qr_loaded = 0;
 
 static int qr_hk_loaded = 0;  /* Hawkes loaded on top of QR (Wu2019 hybrid) */
+static int hk_additive = 0;   /* μ=0 everywhere → additive residual: rate += Σα·φ */
 
 /* QR2: adds opposite-queue bucket to tp/tm rates (HLR's 3-D conditioning).
  * Captures directional asymmetry QR misses (§14 drift at moderate imb). */
@@ -346,32 +347,44 @@ static int load_hawkes(const char *path) {
   }
   fclose(f);
 
-  /* Solve (I − B)·λ = μ via Gauss-Jordan with partial pivoting. */
-  double A[N_HAWKES][N_HAWKES + 1];
-  for (int cc = 0; cc < N_HAWKES; cc++) {
-    for (int jj = 0; jj < N_HAWKES; jj++)
-      A[cc][jj] = (cc == jj ? 1.0 : 0.0) - hk_alpha[cc][jj] / hk_beta;
-    A[cc][N_HAWKES] = hk_mu[cc];
+  /* Detect additive mode: if μ≡0 the params file encodes a residual-fit
+   * Hawkes for Wu-Rambaldi additive form (rate = λ_QR + Σα·φ).  No λ_stat
+   * solve, no φ_stat warm-up — φ starts at zero and tracks events. */
+  double mu_sum = 0;
+  for (int c = 0; c < N_HAWKES; c++) mu_sum += hk_mu[c];
+  hk_additive = (mu_sum == 0.0);
+  if (hk_additive) {
+    for (int jj = 0; jj < N_HAWKES; jj++) {
+      hk_lambda_stat[jj] = 0.0;
+      hk_phi_stat[jj] = 0.0;
+      hk_phi[jj] = 0.0;
+    }
+    return 1;
   }
-  for (int p = 0; p < N_HAWKES; p++) {
-    int piv = p; double best = fabs(A[p][p]);
-    for (int r = p + 1; r < N_HAWKES; r++)
-      if (fabs(A[r][p]) > best) { best = fabs(A[r][p]); piv = r; }
-    if (piv != p)
-      for (int cc = 0; cc < N_HAWKES + 1; cc++) {
-        double t = A[p][cc]; A[p][cc] = A[piv][cc]; A[piv][cc] = t;
-      }
-    for (int r = 0; r < N_HAWKES; r++)
-      if (r != p && A[r][p] != 0.0) {
-        double fac = A[r][p] / A[p][p];
-        for (int cc = p; cc < N_HAWKES + 1; cc++) A[r][cc] -= fac * A[p][cc];
-      }
+
+  /* Multiplicative form (μ>0): stationary λ solves (I − α/β)·λ = μ. */
+  for (int c = 0; c < N_HAWKES; c++) {
+    double lam = hk_mu[c];
+    for (int j = 0; j < N_HAWKES; j++)
+      lam += hk_alpha[c][j] * hk_mu[j] / hk_beta;   /* first-order approx */
+    hk_lambda_stat[c] = lam;
+    hk_phi_stat[c] = lam / hk_beta;
+    hk_phi[c] = hk_phi_stat[c];
   }
-  for (int jj = 0; jj < N_HAWKES; jj++) {
-    double lambda = (A[jj][jj] != 0.0) ? A[jj][N_HAWKES] / A[jj][jj] : 0.0;
-    hk_lambda_stat[jj] = lambda;
-    hk_phi_stat[jj] = lambda / hk_beta;
-    hk_phi[jj]      = hk_phi_stat[jj];
+  /* Fixed-point polish for the (I − α/β)·λ = μ system, 10 iters suffices. */
+  for (int it = 0; it < 10; it++) {
+    double next[N_HAWKES];
+    for (int c = 0; c < N_HAWKES; c++) {
+      double s = hk_mu[c];
+      for (int j = 0; j < N_HAWKES; j++)
+        s += hk_alpha[c][j] * hk_lambda_stat[j] / hk_beta;
+      next[c] = s;
+    }
+    for (int c = 0; c < N_HAWKES; c++) {
+      hk_lambda_stat[c] = next[c];
+      hk_phi_stat[c] = next[c] / hk_beta;
+      hk_phi[c] = hk_phi_stat[c];
+    }
   }
   return 1;
 }
@@ -526,12 +539,22 @@ static double compute_rates_qr(struct Row *r, double rates[N_HAWKES]) {
    * During a burst → multiplier>1 → more events.  Captures temporal
    * self-excitation on top of memoryless state-conditional rates. */
   if (qr_hk_loaded) {
-    for (int c = 0; c < N_HAWKES; c++) {
-      double lam_curr = hk_mu[c];
-      for (int j = 0; j < N_HAWKES; j++) lam_curr += hk_alpha[c][j] * hk_phi[j];
-      double m = (hk_lambda_stat[c] > 0) ? lam_curr / hk_lambda_stat[c] : 1.0;
-      if (m < 0) m = 0;
-      rates[c] *= m;
+    if (hk_additive) {
+      /* Wu-Rambaldi additive residual: rate += Σ_j α_{c,j} φ_j. */
+      for (int c = 0; c < N_HAWKES; c++) {
+        double add = 0;
+        for (int j = 0; j < N_HAWKES; j++) add += hk_alpha[c][j] * hk_phi[j];
+        rates[c] += add;
+        if (rates[c] < 0) rates[c] = 0;
+      }
+    } else {
+      for (int c = 0; c < N_HAWKES; c++) {
+        double lam_curr = hk_mu[c];
+        for (int j = 0; j < N_HAWKES; j++) lam_curr += hk_alpha[c][j] * hk_phi[j];
+        double m = (hk_lambda_stat[c] > 0) ? lam_curr / hk_lambda_stat[c] : 1.0;
+        if (m < 0) m = 0;
+        rates[c] *= m;
+      }
     }
   }
 
